@@ -26,6 +26,11 @@ const envSchema = z.object({
   OPENROUTER_BASE_URL: z.string().url().default("https://openrouter.ai/api"),
   OPENROUTER_MODEL: z.string().optional(),
   OPENROUTER_JUDGE_MODEL: z.string().optional(),
+  // 018: modelo para transcribir notas de voz (debe aceptar audio en
+  // /v1/chat/completions, ej. "google/gemini-2.5-flash"). Opcional: sin ella
+  // se reusa OPENROUTER_MODEL — si ese modelo no acepta audio, la
+  // transcripción simplemente no llega (degradación, nunca error visible).
+  OPENROUTER_TRANSCRIBE_MODEL: z.string().optional(),
   // 014/017: canales encendidos, separados por coma. WhatsApp siempre esta on.
   // Ej.: CHANNELS=whatsapp,instagram,messenger. Sin ella, la instancia es solo
   // WhatsApp y las superficies de los demas canales responden 404.
@@ -49,6 +54,9 @@ const envSchema = z.object({
   GOOGLE_OAUTH_BASE_URL: z.string().url().default("https://oauth2.googleapis.com"),
   ALLOW_SIGNUP: z.string().optional(),
   AGENT_COALESCE_MS: z.coerce.number().int().min(0).default(6000),
+  // Techo de llamadas simultáneas al proveedor LLM: protege la factura y evita
+  // que una ráfaga de conversaciones dispare cientos de requests a la vez.
+  AI_MAX_CONCURRENT_REQUESTS: z.coerce.number().int().min(1).default(4),
   WA_MOCK_ENABLED: z.string().optional(),
   // API key de un cerebro externo que conduzca la conversación por /api/bot/*.
   // Sin ella, toda esa superficie responde 401.

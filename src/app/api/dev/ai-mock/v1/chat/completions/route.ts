@@ -8,7 +8,7 @@ export async function POST(req: Request) {
   if (guard) return guard;
 
   const body = (await req.json().catch(() => ({}))) as {
-    messages?: { role: string; content: string }[];
+    messages?: { role: string; content: unknown }[];
   };
   const content = aiMockCompletion(body.messages ?? []);
   return Response.json({

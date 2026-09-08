@@ -1,11 +1,9 @@
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
+import { startPendingMessageSweeper } from "@/server/inbox/sweeper";
 
-/**
- * Limpieza al arranque (FR-034): corridas del Laboratorio que quedaron
- * "running" tras un reinicio → fallidas. Solo corre en el runtime Node.
- */
-export async function cleanupOrphanRuns(): Promise<void> {
+/** Corridas del Laboratorio que quedaron "running" tras un reinicio → fallidas. */
+async function cleanupOrphanRuns(): Promise<void> {
   try {
     const db = getDb();
     const updated = await db
@@ -26,4 +24,10 @@ export async function cleanupOrphanRuns(): Promise<void> {
     // La BD puede no estar lista aún (migraciones corren antes del server).
     console.error("[boot] limpieza de corridas huérfanas falló:", err);
   }
+}
+
+/** Tareas de arranque del runtime Node (FR-034 + sweeper de mensajes colgados). */
+export async function runBootTasks(): Promise<void> {
+  await cleanupOrphanRuns();
+  startPendingMessageSweeper();
 }
