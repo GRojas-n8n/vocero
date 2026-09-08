@@ -20,7 +20,8 @@
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "seed:demo": "esbuild scripts/seed/demo.ts --bundle --platform=node --format=esm --outfile=.tmp-seed-demo.mjs --alias:@=./src --packages=external && node .tmp-seed-demo.mjs"
+    "seed:demo": "esbuild scripts/seed/demo.ts --bundle --platform=node --format=esm --outfile=.tmp-seed-demo.mjs --alias:@=./src --packages=external && node .tmp-seed-demo.mjs",
+    "seed:mas-impulso": "esbuild scripts/seed/mas-impulso.ts --bundle --platform=node --format=esm --outfile=.tmp-seed-mas-impulso.mjs --alias:@=./src --packages=external && node .tmp-seed-mas-impulso.mjs"
   },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
