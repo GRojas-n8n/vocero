@@ -7,12 +7,39 @@ import { JUDGE_MARKER } from "@/server/ai/prompts";
  * apunta explícitamente a él y el gate de mocks está activo.
  */
 
-type InMessage = { role: string; content: string };
+type ContentPart = { type?: string; text?: string };
+type InMessage = { role: string; content: unknown };
+
+/** 018: el contenido puede ser un string o partes multimodales (texto+audio). */
+function flattenContent(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return (content as ContentPart[])
+      .filter((p) => p.type === "text" && typeof p.text === "string")
+      .map((p) => p.text)
+      .join(" ");
+  }
+  return "";
+}
+
+function isTranscriptionRequest(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    (content as ContentPart[]).some((p) => p.type === "input_audio")
+  );
+}
 
 export function aiMockCompletion(messages: InMessage[]): string {
-  const system = messages.find((m) => m.role === "system")?.content ?? "";
-  const lastUser =
-    [...messages].reverse().find((m) => m.role === "user")?.content ?? "";
+  const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
+  // 018: transcripción de audio — determinista, sin decodificar el audio real.
+  if (lastUserMsg && isTranscriptionRequest(lastUserMsg.content)) {
+    return JSON.stringify({ text: "transcripción de prueba de la nota de voz" });
+  }
+
+  const system = flattenContent(
+    messages.find((m) => m.role === "system")?.content ?? ""
+  );
+  const lastUser = flattenContent(lastUserMsg?.content ?? "");
 
   // Juez del Laboratorio: veredicto determinista por persona. Para cerrar el
   // loop del self-test, la persona fuera_de_kb pasa a verde si el CONOCIMIENTO

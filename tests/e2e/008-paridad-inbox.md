@@ -33,6 +33,7 @@ los pasos visuales de Playwright.
 |---|---|
 | AC-1 foto ampliable | "imagen entrante queda disponible" + "el binario entrante se sirve" |
 | AC-2 nota de voz reproducible | mismo pipeline que imagen (kind audio); visual en Playwright |
+| AC-2b transcripción en segundo plano (018) | "nota de voz entrante queda transcrita en la caption" — el agente deja de ignorar mensajes solo-audio (bug 3.1) |
 | AC-3 disponible tras expirar en Meta | el binario se sirve desde `MEDIA_DIR`, no desde Graph (la URL del mock solo se usa al descargar) |
 | AC-4 contenido no disponible degradado | "descarga fallida degrada a failed" + "410 gone" |
 

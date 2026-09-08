@@ -3,7 +3,9 @@ import path from "node:path";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { getEnv } from "@/lib/env";
+import { transcribeAudio } from "@/lib/ai";
 import { graphRequest, MetaApiError } from "@/lib/meta/client";
+import { publish } from "@/server/events/bus";
 import {
   getCredentialsByOrg,
   type Credentials,
@@ -220,7 +222,14 @@ export async function ensureAssetAvailable(
       })
       .where(eq(schema.mediaAsset.id, assetId))
       .returning();
-    return updated[0] ?? null;
+    const result = updated[0] ?? null;
+    if (result && result.kind === "audio" && !result.caption) {
+      // En segundo plano: nunca bloquea la descarga ni el ingest (FR-013).
+      transcribeAndCaption(assetId, data, result.mimeType ?? "audio/ogg").catch(
+        (err) => console.warn(`[media] transcripción del asset ${assetId} falló:`, err)
+      );
+    }
+    return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await db
@@ -230,6 +239,47 @@ export async function ensureAssetAvailable(
     console.warn(`[media] descarga del asset ${assetId} falló: ${message}`);
     return null;
   }
+}
+
+/**
+ * 018 — Transcribe la nota de voz y la deja en `caption` (WhatsApp nunca
+ * pone caption en audio, así que el campo está libre): el agente
+ * (historyAsChatMessages) y la bandeja la muestran como si fuera texto del
+ * mensaje, sin tabla nueva. Un hipo del proveedor deja el asset sin
+ * transcripción — nunca sin audio ni rompe nada más.
+ */
+async function transcribeAndCaption(
+  assetId: string,
+  data: Buffer,
+  mimeType: string
+): Promise<void> {
+  const result = await transcribeAudio({ data, mimeType });
+  if (!result.ok) return;
+  const db = getDb();
+  await db
+    .update(schema.mediaAsset)
+    .set({ caption: result.text, updatedAt: new Date() })
+    .where(eq(schema.mediaAsset.id, assetId));
+
+  const msgRows = await db
+    .select({
+      id: schema.message.id,
+      organizationId: schema.message.organizationId,
+      conversationId: schema.message.conversationId,
+    })
+    .from(schema.message)
+    .where(eq(schema.message.mediaAssetId, assetId))
+    .limit(1);
+  const msg = msgRows[0];
+  if (!msg) return;
+  publish(msg.organizationId, {
+    type: "message.media",
+    data: {
+      conversationId: msg.conversationId,
+      messageId: msg.id,
+      caption: result.text,
+    },
+  });
 }
 
 /* ---------- Subida a Graph (salientes) ---------- */

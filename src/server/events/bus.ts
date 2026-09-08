@@ -19,6 +19,11 @@ export type SseEvent =
       };
     }
   | { type: "conversation.updated"; data: { conversation: unknown } }
+  /** 018 — la transcripción de una nota de voz quedó lista tras la descarga. */
+  | {
+      type: "message.media";
+      data: { conversationId: string; messageId: string; caption: string };
+    }
   /** 015 — algo cambió en la agenda: la pantalla de Citas se refresca sola. */
   | { type: "booking.updated"; data: { bookingId: string } }
   | {

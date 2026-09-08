@@ -907,6 +907,30 @@ async function main() {
   });
   ok("el binario entrante se sirve desde el volumen local", inImgBin.ok);
 
+  // 018: nota de voz entrante — antes desaparecía del turno del agente
+  // (sin texto → filtrada); ahora el ai-mock la transcribe en segundo plano
+  // y la caption queda visible como si fuera texto del mensaje.
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD,
+      type: "audio",
+      mediaId: "media-e2e-audio-1",
+      waMessageId: "wamid.e2e.008.in.audio",
+    }),
+  });
+  await sleep(2200); // ingesta + descarga + transcripción vía ai-mock
+  const msgs6b =
+    (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
+  const inAudio = msgs6b.find((m) => m.media?.kind === "audio");
+  ok(
+    "nota de voz entrante queda transcrita en la caption (018)",
+    inAudio?.media?.fetchStatus === "available" &&
+      inAudio?.media?.caption === "transcripción de prueba de la nota de voz",
+    JSON.stringify(inAudio?.media)
+  );
+
   // Ubicación entrante: payload directo, sin binario (404 en /api/media).
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",

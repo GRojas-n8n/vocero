@@ -1,4 +1,4 @@
-import type { z } from "zod";
+import { z } from "zod";
 import { getEnv, isAiConfigured } from "@/lib/env";
 
 /**
@@ -8,9 +8,14 @@ import { getEnv, isAiConfigured } from "@/lib/env";
  * proveedor jamás propaga excepción (resultado `error` tipado).
  */
 
+/** 018: parte multimodal de un mensaje — hoy solo la usa la transcripción de audio. */
+export type ChatContentPart =
+  | { type: "text"; text: string }
+  | { type: "input_audio"; input_audio: { data: string; format: string } };
+
 export type ChatMessage = {
   role: "system" | "user" | "assistant";
-  content: string;
+  content: string | ChatContentPart[];
 };
 
 export type ChatJsonResult<T> =
@@ -19,6 +24,46 @@ export type ChatJsonResult<T> =
 
 const MAX_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 500;
+
+/** Lanzada cuando el proveedor responde 429; carga el `Retry-After` si vino. */
+class RateLimitError extends Error {
+  retryAfterMs: number | null;
+  constructor(message: string, retryAfterMs: number | null) {
+    super(message);
+    this.name = "RateLimitError";
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+/**
+ * Semáforo global en proceso: techa cuántas llamadas al proveedor corren a la
+ * vez (protege la factura ante ráfagas de conversaciones). Sin cola externa
+ * (constitución II): un array de resolvers alcanza para un monolito.
+ */
+const globalForAi = globalThis as unknown as {
+  __aiActive?: number;
+  __aiQueue?: (() => void)[];
+};
+function acquireSlot(): Promise<() => void> {
+  globalForAi.__aiActive ??= 0;
+  globalForAi.__aiQueue ??= [];
+  const release = () => {
+    globalForAi.__aiActive!--;
+    const next = globalForAi.__aiQueue!.shift();
+    if (next) next();
+  };
+  const max = getEnv().AI_MAX_CONCURRENT_REQUESTS;
+  if (globalForAi.__aiActive! < max) {
+    globalForAi.__aiActive!++;
+    return Promise.resolve(release);
+  }
+  return new Promise((resolve) => {
+    globalForAi.__aiQueue!.push(() => {
+      globalForAi.__aiActive!++;
+      resolve(release);
+    });
+  });
+}
 
 export async function chatJson<T>(
   schema: z.ZodType<T>,
@@ -46,49 +91,58 @@ export async function chatJson<T>(
     };
   }
 
-  let lastDetail = "";
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    const attemptMessages: ChatMessage[] =
-      attempt === 1
-        ? messages
-        : [
-            ...messages,
-            {
-              role: "system",
-              content:
-                "STRICT: tu respuesta anterior no fue JSON válido según el esquema. Responde ÚNICAMENTE el objeto JSON, sin explicaciones ni markdown.",
-            },
-          ];
-    try {
-      const raw = await callProvider(model, attemptMessages, opts?.timeoutMs);
-      const extracted = extractJson(raw);
-      if (extracted === null) {
-        lastDetail = `sin JSON extraíble (raw=${truncate(raw)})`;
-        continue;
-      }
-      const parsed = schema.safeParse(extracted);
-      if (!parsed.success) {
-        lastDetail = `no cumple el esquema: ${parsed.error.issues
-          .map((i) => i.path.join(".") + " " + i.message)
-          .join("; ")} (raw=${truncate(raw)})`;
-        continue;
-      }
-      return { ok: true, data: parsed.data, raw };
-    } catch (err) {
-      lastDetail = err instanceof Error ? err.message : String(err);
-      if (attempt < MAX_ATTEMPTS) {
-        await sleep(RETRY_DELAY_MS * attempt);
+  const release = await acquireSlot();
+  try {
+    let lastDetail = "";
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      const attemptMessages: ChatMessage[] =
+        attempt === 1
+          ? messages
+          : [
+              ...messages,
+              {
+                role: "system",
+                content:
+                  "STRICT: tu respuesta anterior no fue JSON válido según el esquema. Responde ÚNICAMENTE el objeto JSON, sin explicaciones ni markdown.",
+              },
+            ];
+      try {
+        const raw = await callProvider(model, attemptMessages, opts?.timeoutMs);
+        const extracted = extractJson(raw);
+        if (extracted === null) {
+          lastDetail = `sin JSON extraíble (raw=${truncate(raw)})`;
+          continue;
+        }
+        const parsed = schema.safeParse(extracted);
+        if (!parsed.success) {
+          lastDetail = `no cumple el esquema: ${parsed.error.issues
+            .map((i) => i.path.join(".") + " " + i.message)
+            .join("; ")} (raw=${truncate(raw)})`;
+          continue;
+        }
+        return { ok: true, data: parsed.data, raw };
+      } catch (err) {
+        lastDetail = err instanceof Error ? err.message : String(err);
+        if (attempt < MAX_ATTEMPTS) {
+          const delay =
+            err instanceof RateLimitError && err.retryAfterMs !== null
+              ? err.retryAfterMs
+              : RETRY_DELAY_MS * attempt;
+          await sleep(delay);
+        }
       }
     }
-  }
 
-  return {
-    ok: false,
-    error: lastDetail.includes("esquema") || lastDetail.includes("JSON")
-      ? "invalid_output"
-      : "provider_error",
-    detail: lastDetail,
-  };
+    return {
+      ok: false,
+      error: lastDetail.includes("esquema") || lastDetail.includes("JSON")
+        ? "invalid_output"
+        : "provider_error",
+      detail: lastDetail,
+    };
+  } finally {
+    release();
+  }
 }
 
 async function callProvider(
@@ -112,6 +166,12 @@ async function callProvider(
     });
     if (!res.ok) {
       const text = await res.text().catch(() => "");
+      if (res.status === 429) {
+        throw new RateLimitError(
+          `proveedor respondió 429: ${truncate(text)}`,
+          parseRetryAfter(res.headers.get("retry-after"))
+        );
+      }
       throw new Error(`proveedor respondió ${res.status}: ${truncate(text)}`);
     }
     const json = (await res.json()) as {
@@ -125,6 +185,64 @@ async function callProvider(
   } finally {
     clearTimeout(timer);
   }
+}
+
+const transcriptSchema = z.object({ text: z.string() });
+
+/** Deriva el `format` de input_audio del mime del adjunto (ej. audio/ogg → ogg). */
+function audioFormatFromMime(mimeType: string): string {
+  const m = mimeType.toLowerCase();
+  if (m.includes("mpeg") || m.includes("mp3")) return "mp3";
+  if (m.includes("wav")) return "wav";
+  if (m.includes("mp4") || m.includes("m4a")) return "mp4";
+  if (m.includes("aac")) return "aac";
+  if (m.includes("amr")) return "amr";
+  return "ogg"; // formato por defecto de las notas de voz de WhatsApp
+}
+
+/**
+ * 018 — Transcribe una nota de voz reusando el MISMO proveedor OpenRouter-
+ * compatible del agente (constitución II: sin proveedor de terceros nuevo).
+ * Solo funciona si el modelo configurado acepta audio en chat completions;
+ * si no, el proveedor falla y esto degrada a "sin transcripción" — nunca
+ * bloquea la descarga del adjunto ni el turno del agente.
+ */
+export async function transcribeAudio(input: {
+  data: Buffer;
+  mimeType: string;
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  if (!isAiConfigured()) return { ok: false, error: "not_configured" };
+  const env = getEnv();
+  const model = env.OPENROUTER_TRANSCRIBE_MODEL ?? env.OPENROUTER_MODEL;
+  if (!model?.trim()) return { ok: false, error: "not_configured" };
+
+  const result = await chatJson(
+    transcriptSchema,
+    [
+      {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text:
+              'Transcribe este audio a texto plano en el idioma en que se habló, tal cual se dijo, sin resumir ni traducir. Si no hay voz entendible, responde con text vacío. Responde ÚNICAMENTE {"text":"..."}.',
+          },
+          {
+            type: "input_audio",
+            input_audio: {
+              data: input.data.toString("base64"),
+              format: audioFormatFromMime(input.mimeType),
+            },
+          },
+        ],
+      },
+    ],
+    { model, timeoutMs: 45_000 }
+  );
+  if (!result.ok) return { ok: false, error: result.detail };
+  const text = result.data.text.trim();
+  if (!text) return { ok: false, error: "sin voz entendible" };
+  return { ok: true, text };
 }
 
 /**
@@ -149,6 +267,16 @@ export function extractJson(raw: string): unknown | null {
       // siguiente candidato
     }
   }
+  return null;
+}
+
+/** `Retry-After` viene en segundos o como fecha HTTP; null si falta o es basura. */
+function parseRetryAfter(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(header);
+  if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
   return null;
 }
 

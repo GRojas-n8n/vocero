@@ -1,4 +1,4 @@
-import { asc, desc, eq } from "drizzle-orm";
+import { asc, desc, eq, inArray } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { scoped } from "@/lib/db/tenant";
@@ -87,6 +87,70 @@ async function executeTurn(conversationId: string): Promise<void> {
   }
 }
 
+type HistoryRow = typeof schema.message.$inferSelect;
+
+/** Descripción textual de un adjunto sin transcripción (bug: antes el turno
+ * ni se enteraba de que había llegado algo — un cliente mandando SOLO notas
+ * de voz nunca recibía respuesta). */
+function mediaPlaceholder(
+  kind: typeof schema.mediaAsset.$inferSelect["kind"]
+): string {
+  switch (kind) {
+    case "audio":
+      return "[nota de voz — sin transcripción disponible]";
+    case "image":
+      return "[imagen]";
+    case "video":
+      return "[video]";
+    case "document":
+      return "[documento]";
+    case "sticker":
+      return "[sticker]";
+    case "location":
+      return "[ubicación compartida]";
+    case "contacts":
+      return "[contacto compartido]";
+  }
+}
+
+/**
+ * Arma el historial para el LLM. Un mensaje sin `text` (adjunto) YA NO
+ * desaparece del turno: entra con un marcador (o la transcripción, si 018 la
+ * dejó en `media.caption`) para que el agente sepa que algo llegó en vez de
+ * quedarse mudo.
+ */
+async function historyAsChatMessages(
+  history: HistoryRow[]
+): Promise<ChatMessage[]> {
+  const mediaIds = history
+    .map((m) => m.mediaAssetId)
+    .filter((id): id is string => id !== null);
+  const mediaById = new Map<string, typeof schema.mediaAsset.$inferSelect>();
+  if (mediaIds.length > 0) {
+    const db = getDb();
+    const rows = await db
+      .select()
+      .from(schema.mediaAsset)
+      .where(inArray(schema.mediaAsset.id, mediaIds));
+    for (const row of rows) mediaById.set(row.id, row);
+  }
+
+  const out: ChatMessage[] = [];
+  for (const m of history) {
+    let content = m.text;
+    if (!content && m.mediaAssetId) {
+      const media = mediaById.get(m.mediaAssetId);
+      if (media) content = media.caption || mediaPlaceholder(media.kind);
+    }
+    if (!content) continue;
+    out.push({
+      role: m.direction === "in" ? "user" : "assistant",
+      content,
+    });
+  }
+  return out;
+}
+
 /**
  * Ejecuta UN turno del agente ahora (el Laboratorio lo llama directo, con
  * debounce 0 y sin pasar por el coalesce).
@@ -157,12 +221,7 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
       role: "system",
       content: buildAgentSystemPrompt({ profile, kb, stages, agenda }),
     },
-    ...history
-      .filter((m) => m.text)
-      .map((m) => ({
-        role: m.direction === "in" ? ("user" as const) : ("assistant" as const),
-        content: m.text!,
-      })),
+    ...(await historyAsChatMessages(history)),
   ];
 
   const result = await chatJson(agentActionSchema(agenda), messages);
