@@ -2,6 +2,7 @@ import { asc, eq } from "drizzle-orm";
 import { apiError, withAuth } from "@/lib/api";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
+import { labDisabledResponse, labEnabled } from "@/server/lab/flag";
 import { PERSONA_LABELS } from "@/server/lab/personas";
 
 export const dynamic = "force-dynamic";
@@ -9,6 +10,7 @@ export const dynamic = "force-dynamic";
 type Params = { params: Promise<{ id: string }> };
 
 export const GET = withAuth(async (session, _req: Request, ctx: Params) => {
+  if (!labEnabled()) return labDisabledResponse();
   const { id } = await ctx.params;
   const db = getDb();
   const runs = await db

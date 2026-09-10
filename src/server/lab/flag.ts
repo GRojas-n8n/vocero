@@ -30,3 +30,12 @@ export function parseLabFlag(raw: string | undefined): boolean {
 export function labEnabled(): boolean {
   return parseLabFlag(process.env.LAB);
 }
+
+/**
+ * Respuesta para una superficie del Laboratorio apagada. 404 y no 403 a
+ * propósito: si LAB no está encendida, ese endpoint no existe en esta
+ * instancia — no hay nada que revelar sobre él.
+ */
+export function labDisabledResponse(): Response {
+  return new Response(null, { status: 404 });
+}

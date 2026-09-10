@@ -3,12 +3,14 @@ import { apiError, withAuth } from "@/lib/api";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
 import { isAiConfigured } from "@/lib/env";
+import { labDisabledResponse, labEnabled } from "@/server/lab/flag";
 import { RunConflictError, startRun } from "@/server/lab/runner";
 
 export const dynamic = "force-dynamic";
 
 /** Historial de corridas con delta de score vs la anterior (FR-033). */
 export const GET = withAuth(async (session) => {
+  if (!labEnabled()) return labDisabledResponse();
   const db = getDb();
   const runs = await db
     .select()
@@ -38,6 +40,7 @@ export const GET = withAuth(async (session) => {
 });
 
 export const POST = withAuth(async (session) => {
+  if (!labEnabled()) return labDisabledResponse();
   if (!isAiConfigured()) {
     return apiError(
       409,
