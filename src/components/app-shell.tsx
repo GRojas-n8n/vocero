@@ -27,6 +27,7 @@ export function AppShell({
   theme,
   commit,
   agenda = false,
+  lab = false,
   children,
 }: {
   branding: Branding;
@@ -37,6 +38,8 @@ export function AppShell({
   commit?: string;
   /** 015 — ¿esta instancia tiene agenda? Lo decide el servidor. */
   agenda?: boolean;
+  /** ¿esta instancia tiene el Laboratorio encendido? Lo decide el servidor. */
+  lab?: boolean;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -75,6 +78,7 @@ export function AppShell({
         role={role}
         theme={theme}
         agenda={agenda}
+        lab={lab}
         open={navOpen}
         onClose={() => setNavOpen(false)}
       />

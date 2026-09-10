@@ -35,7 +35,6 @@ const NAV: NavItem[] = [
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
   { href: "/contacts", label: "Contactos", icon: Users },
   { href: "/agent", label: "Agente", icon: Sparkles },
-  { href: "/lab", label: "Laboratorio", icon: FlaskConical },
 ];
 
 /** 015 — "Citas" solo existe si esta instancia encendió la agenda. */
@@ -43,6 +42,13 @@ const AGENDA_ITEM: NavItem = {
   href: "/bookings",
   label: "Citas",
   icon: CalendarDays,
+};
+
+/** "Laboratorio" solo existe si esta instancia encendió la bandera LAB. */
+const LAB_ITEM: NavItem = {
+  href: "/lab",
+  label: "Laboratorio",
+  icon: FlaskConical,
 };
 
 /**
@@ -65,6 +71,7 @@ export function AppNav({
   theme,
   commit,
   agenda = false,
+  lab = false,
   open = false,
   onClose,
 }: {
@@ -83,6 +90,9 @@ export function AppNav({
    * todavía debe ver la entrada igual.
    */
   agenda?: boolean;
+  /** ¿esta instancia tiene el Laboratorio encendido? Igual que `agenda`, lo
+   * decide el servidor por prop. */
+  lab?: boolean;
   /** Solo aplica por debajo de `lg`: en escritorio el lateral es fijo. */
   open?: boolean;
   onClose?: () => void;
@@ -113,9 +123,12 @@ export function AppNav({
   const settingsActive = pathname.startsWith("/settings");
   // Citas va después de Pipeline: es el paso siguiente de un trato, no una
   // sección aparte.
-  const items = agenda
-    ? [...NAV.slice(0, 2), AGENDA_ITEM, ...NAV.slice(2)]
-    : NAV;
+  const items = [
+    ...NAV.slice(0, 2),
+    ...(agenda ? [AGENDA_ITEM] : []),
+    ...NAV.slice(2),
+    ...(lab ? [LAB_ITEM] : []),
+  ];
 
   return (
     <aside

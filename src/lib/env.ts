@@ -43,6 +43,10 @@ const envSchema = z.object({
   // conversacion, no se le reporta nada a Meta y la superficie da 404.
   // Ej.: ATRIBUCION=on
   ATRIBUCION: z.string().optional(),
+  // Laboratorio de auto-evaluación (QA de agencia, no del MVP comercial).
+  // Apagado por defecto — sin el, la ruta /lab responde 404 y no aparece en
+  // el menu. Ej.: LAB=on
+  LAB: z.string().optional(),
   // 015: bases de los conectores. Solo se sobreescriben para apuntar a los
   // mocks en el self-test; en producción se usan las reales.
   ZOOM_BASE_URL: z.string().url().default("https://api.zoom.us/v2"),
