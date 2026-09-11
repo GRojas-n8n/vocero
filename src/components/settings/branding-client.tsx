@@ -24,6 +24,7 @@ export function BrandingClient() {
   const [name, setName] = useState("");
   const [accent, setAccent] = useState<string>(DEFAULT_BRANDING.accent);
   const [currency, setCurrency] = useState<Currency>(DEFAULT_CURRENCY);
+  const [favicon, setFavicon] = useState<Branding["favicon"]>(null);
   const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -37,6 +38,7 @@ export function BrandingClient() {
           setName(d.branding.name);
           setAccent(d.branding.accent);
           if (d.branding.currency) setCurrency(d.branding.currency);
+          setFavicon(d.branding.favicon);
         }
         setLoaded(true);
       })
@@ -178,7 +180,9 @@ export function BrandingClient() {
           >
             <div className="flex items-center gap-2.5">
               <div className="min-w-0">
-                <BrandLogo branding={{ name: name.trim() || DEFAULT_BRANDING.name }} />
+                <BrandLogo
+                  branding={{ name: name.trim() || DEFAULT_BRANDING.name, favicon }}
+                />
                 <span className="kicker mt-1.5 block">CRM · WhatsApp</span>
               </div>
               <span className="flex-1" />

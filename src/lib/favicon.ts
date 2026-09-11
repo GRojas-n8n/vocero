@@ -5,7 +5,7 @@ import {
   BRAND_MARK_TAIL,
   isVoceroName,
 } from "./brand";
-import { resolveAccentSet, type Branding } from "./branding";
+import { DEFAULT_BRANDING, resolveAccentSet, type Branding } from "./branding";
 
 /**
  * El icono de la pestaña, white-label.
@@ -143,17 +143,20 @@ function voceroFaviconSvg(from: string, to: string): string {
  * el número de versión; para el generado, un hash del nombre y el acento, que
  * son justo lo que lo cambia.
  */
-export function faviconCacheKey(branding: Branding): string {
+type FaviconCacheInput = Pick<Branding, "name" | "favicon"> &
+  Partial<Pick<Branding, "accent">>;
+
+export function faviconCacheKey(branding: FaviconCacheInput): string {
   if (branding.favicon) return `u${branding.favicon.version}`;
   let h = 0;
-  const semilla = `${branding.name}|${branding.accent}`;
+  const semilla = `${branding.name}|${branding.accent ?? DEFAULT_BRANDING.accent}`;
   for (let i = 0; i < semilla.length; i++) {
     h = (h * 31 + semilla.charCodeAt(i)) >>> 0;
   }
   return `g${h.toString(36)}`;
 }
 
-/** URL que va en el `<link rel="icon">`. */
-export function faviconHref(branding: Branding): string {
+/** URL que va en el `<link rel="icon">` — y, con logo subido, también en el mosaico del sidebar. */
+export function faviconHref(branding: FaviconCacheInput): string {
   return `/api/branding/favicon?v=${faviconCacheKey(branding)}`;
 }

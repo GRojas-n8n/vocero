@@ -7,8 +7,11 @@ import {
   BRAND_MARK_TAIL,
   isVoceroName,
 } from "@/lib/brand";
-import { faviconInitial } from "@/lib/favicon";
+import { faviconHref, faviconInitial } from "@/lib/favicon";
 import { cn } from "@/lib/utils";
+
+/** Lo que el mosaico/logo necesitan de la marca: el nombre y, si existe, el logo subido. */
+type BrandingLike = Pick<Branding, "name"> & Partial<Pick<Branding, "favicon">>;
 
 /**
  * El trazo de la marca: la "v" caligráfica con remate cian de vocerocrm.com.
@@ -43,25 +46,33 @@ export function BrandMark({
 }
 
 /**
- * Mosaico cuadrado con degradado del acento: es el favicon en grande. Con la
- * marca Vocero lleva la "v"; con un nombre white-label, la inicial.
+ * Mosaico cuadrado con degradado del acento: es el favicon en grande. Con un
+ * logo subido se usa ESE archivo (el mismo del ícono de pestaña); sin logo,
+ * la marca Vocero lleva la "v" y un nombre white-label, la inicial.
  */
 export function BrandTile({
   branding,
   className,
 }: {
-  branding: Pick<Branding, "name">;
+  branding: BrandingLike;
   className?: string;
 }) {
   return (
     <span
       className={cn(
-        "brand-tile flex shrink-0 items-center justify-center text-brand-fg",
+        "brand-tile flex shrink-0 items-center justify-center overflow-hidden text-brand-fg",
         className
       )}
       aria-hidden
     >
-      {isVoceroName(branding.name) ? (
+      {branding.favicon ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={faviconHref(branding as Pick<Branding, "name" | "favicon">)}
+          alt=""
+          className="h-full w-full object-contain"
+        />
+      ) : isVoceroName(branding.name) ? (
         <BrandMark className="h-[64%] w-[64%]" cyan={BRAND_CYAN_ON_TILE} />
       ) : (
         <span className="font-bold leading-none">{faviconInitial(branding.name)}</span>
@@ -87,18 +98,34 @@ const TILE_SIZE = {
 
 /**
  * La marca completa, como en la cabecera de la landing: trazo + wordmark
- * "vocero" en minúsculas y bien apretado. Una instancia rebautizada ve en su
- * lugar el mosaico con la inicial y su nombre (white-label).
+ * "vocero" en minúsculas y bien apretado. Con un logo subido, ESE archivo
+ * reemplaza al trazo/inicial (mismo logo del ícono de pestaña). Sin logo, una
+ * instancia rebautizada ve el mosaico con la inicial y su nombre (white-label).
  */
 export function BrandLogo({
   branding,
   size = "md",
   className,
 }: {
-  branding: Pick<Branding, "name">;
+  branding: BrandingLike;
   size?: keyof typeof WORDMARK_SIZE;
   className?: string;
 }) {
+  if (branding.favicon) {
+    return (
+      <span className={cn("flex min-w-0 items-center gap-2.5", className)}>
+        <BrandTile branding={branding} className={TILE_SIZE[size]} />
+        <span
+          className={cn(
+            "truncate font-[750] leading-none tracking-tight",
+            size === "lg" ? "text-[26px]" : "text-[17px]"
+          )}
+        >
+          {branding.name}
+        </span>
+      </span>
+    );
+  }
   if (isVoceroName(branding.name)) {
     return (
       <span className={cn("flex items-center gap-2 text-foreground", className)}>

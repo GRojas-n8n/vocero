@@ -13,7 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 
 /**
- * El icono de la pestaña.
+ * El logo de la instancia: mismo archivo para el ícono de la pestaña Y para
+ * el mosaico que se ve en el sidebar/header (`BrandTile`/`BrandLogo`).
  *
  * Se muestra SIEMPRE una vista previa: sin logo subido, la del icono generado
  * con la inicial y el acento. Así queda claro que la instancia ya tiene uno y
@@ -77,7 +78,7 @@ export function FaviconCard({ branding }: { branding: Branding }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Icono de la pestaña</CardTitle>
+        <CardTitle>Logo</CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="flex items-center gap-4">
@@ -98,8 +99,8 @@ export function FaviconCard({ branding }: { branding: Branding }) {
             </p>
             <p className="mt-0.5 text-xs text-text-3">
               {actual
-                ? "Reemplaza al generado. Puedes quitarlo para volver a él."
-                : "La inicial sobre tu color de acento. Sube un logo para reemplazarlo."}
+                ? "Se usa en la pestaña del navegador y en el logo del sidebar. Puedes quitarlo para volver al generado."
+                : "La inicial sobre tu color de acento, en la pestaña y en el sidebar. Sube un logo para reemplazarla en ambos lados."}
             </p>
           </div>
         </div>
