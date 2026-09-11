@@ -8,6 +8,7 @@ import { AppShell } from "@/components/app-shell";
 import { resolveBuildCommit } from "@/lib/version";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { labEnabled } from "@/server/lab/flag";
+import { quotesEnabled } from "@/server/quotes/flag";
 
 export default async function AppLayout({
   children,
@@ -35,6 +36,7 @@ export default async function AppLayout({
       // cliente: no puede —ni debe— leer variables de entorno.
       agenda={agendaEnabled()}
       lab={labEnabled()}
+      quotes={quotesEnabled()}
     >
       {children}
     </AppShell>

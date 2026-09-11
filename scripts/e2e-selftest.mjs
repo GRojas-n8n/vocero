@@ -1001,6 +1001,7 @@ async function main() {
 
   await agendaChecks();
   await atribucionChecks();
+  await quotesChecks();
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
@@ -1811,4 +1812,331 @@ async function atribucionChecks() {
     act7.length >= 3,
     `${act7.length} filas`
   );
+}
+
+/* ============================================================
+ * 019 — Cotizaciones (tests/e2e/us-cotizaciones.md)
+ *
+ * Cubre las dos configuraciones de la bandera, el cálculo de totales en el
+ * servidor, la máquina de estados con sus códigos EXACTOS, "vencida" como
+ * vista y no como estado guardado, y —lo que más importa— que el webhook
+ * hacia n8n es best-effort: un receptor caído jamás cuesta la transición.
+ * ============================================================ */
+
+async function quotesChecks() {
+  const encendida = /^(on|1|true|si|sí|yes)$/i.test(
+    (process.env.QUOTES ?? "").trim()
+  );
+
+  console.log("\n== 019: la bandera de cotizaciones ==");
+
+  if (!encendida) {
+    const { res } = await api("/api/quotes");
+    ok(
+      "GET /api/quotes → 404 con QUOTES apagada",
+      res.status === 404,
+      `status=${res.status}`
+    );
+    const post = await api("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({ leadId: "x", items: [] }),
+    });
+    ok(
+      "POST /api/quotes → 404 con QUOTES apagada",
+      post.res.status === 404,
+      `status=${post.res.status}`
+    );
+    const page = await fetch(`${BASE}/quotes`, { headers: { cookie } });
+    ok("la pantalla /quotes no existe", page.status === 404, `status=${page.status}`);
+    console.log("  (cotizaciones apagadas: el resto de los checks de 019 no aplican)");
+    return;
+  }
+
+  const listaInicial = await api("/api/quotes");
+  ok(
+    "GET /api/quotes responde con QUOTES encendida",
+    listaInicial.res.ok,
+    `status=${listaInicial.res.status}`
+  );
+
+  console.log("\n== 019: alta de un lead para cotizar ==");
+  const SUF = String(Date.now()).slice(-6);
+  const NOMBRE = `Lead cotización ${SUF}`;
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: `52155${SUF}9`,
+      name: NOMBRE,
+      text: "quiero una cotización",
+      waMessageId: `wamid.e2e.019.${SUF}`,
+    }),
+  });
+  await sleep(1200);
+  const board = (await api("/api/pipeline/board")).json;
+  const lead = board?.leads?.find((l) => l.contact.name === NOMBRE);
+  ok("lead de prueba listo", !!lead);
+  if (!lead) return;
+
+  console.log("\n== 019: crear y editar un borrador (US2) ==");
+  const sinRenglones = await api("/api/quotes", {
+    method: "POST",
+    body: JSON.stringify({ leadId: lead.id, items: [] }),
+  });
+  ok(
+    "crear sin renglones → 422",
+    sinRenglones.res.status === 422,
+    `status=${sinRenglones.res.status}`
+  );
+
+  const creada = await api("/api/quotes", {
+    method: "POST",
+    body: JSON.stringify({
+      leadId: lead.id,
+      items: [
+        { description: "Consultoría", quantity: 2, unitPriceCents: 100000 },
+        { description: "Setup", quantity: 1, unitPriceCents: 50000 },
+      ],
+      discountCents: 10000,
+    }),
+  });
+  ok(
+    "crear una cotización responde 201",
+    creada.res.status === 201,
+    JSON.stringify(creada.json)
+  );
+  const quoteId = creada.json?.quote?.id;
+  ok(
+    "los totales se calculan en el SERVIDOR (2×1000 + 500 − 100, en centavos)",
+    creada.json?.quote?.subtotalCents === 250000 &&
+      creada.json?.quote?.totalCents === 240000,
+    JSON.stringify(creada.json?.quote)
+  );
+  ok("nace en borrador", creada.json?.quote?.status === "borrador");
+
+  const listaLead =
+    (await api(`/api/quotes?leadId=${lead.id}`)).json?.quotes ?? [];
+  ok(
+    "aparece en la lista filtrada por ese trato",
+    listaLead.some((q) => q.id === quoteId),
+    JSON.stringify(listaLead.map((q) => q.id))
+  );
+
+  const editada = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({
+      action: "update",
+      items: [
+        { description: "Consultoría (ajustada)", quantity: 3, unitPriceCents: 100000 },
+      ],
+      discountCents: 0,
+    }),
+  });
+  ok(
+    "editar un borrador reemplaza renglones y recalcula el total",
+    editada.res.ok && editada.json?.quote?.totalCents === 300000,
+    JSON.stringify(editada.json)
+  );
+
+  console.log("\n== 019: la máquina de estados (US3) ==");
+  const saltoInvalido = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "accept" }),
+  });
+  ok(
+    "borrador → aceptada directo se rechaza (422)",
+    saltoInvalido.res.status === 422,
+    `status=${saltoInvalido.res.status}`
+  );
+
+  const enviada = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "send" }),
+  });
+  ok(
+    "enviar responde ok y queda 'enviada' con sentAt",
+    enviada.res.ok &&
+      enviada.json?.quote?.status === "enviada" &&
+      !!enviada.json?.quote?.sentAt,
+    JSON.stringify(enviada.json)
+  );
+
+  const editarEnviada = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "update", notes: "no debería poder" }),
+  });
+  ok(
+    "editar una cotización ya enviada → 409 (solo un borrador se edita)",
+    editarEnviada.res.status === 409,
+    `status=${editarEnviada.res.status}`
+  );
+
+  const borrarEnviada = await api(`/api/quotes/${quoteId}`, { method: "DELETE" });
+  ok(
+    "borrar una cotización ya enviada → 409",
+    borrarEnviada.res.status === 409,
+    `status=${borrarEnviada.res.status}`
+  );
+
+  const reenviar = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "send" }),
+  });
+  ok(
+    "re-enviar algo ya enviado → 422",
+    reenviar.res.status === 422,
+    `status=${reenviar.res.status}`
+  );
+
+  const aceptada = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "accept" }),
+  });
+  ok(
+    "aceptar responde ok y guarda respondedAt",
+    aceptada.res.ok &&
+      aceptada.json?.quote?.status === "aceptada" &&
+      !!aceptada.json?.quote?.respondedAt,
+    JSON.stringify(aceptada.json)
+  );
+
+  console.log("\n== 019: 'vencida' es una VISTA, no un estado guardado (US3.4) ==");
+  const conVencimiento = await api("/api/quotes", {
+    method: "POST",
+    body: JSON.stringify({
+      leadId: lead.id,
+      validUntil: new Date(Date.now() - 86_400_000).toISOString(),
+      items: [{ description: "Algo con vencimiento", quantity: 1, unitPriceCents: 1000 }],
+    }),
+  });
+  const idVenc = conVencimiento.json?.quote?.id;
+  await api(`/api/quotes/${idVenc}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "send" }),
+  });
+  const leidaVenc = (await api(`/api/quotes/${idVenc}`)).json?.quote;
+  ok(
+    "se MUESTRA vencida aunque el estado guardado siga 'enviada'",
+    leidaVenc?.status === "enviada" && leidaVenc?.displayStatus === "vencida",
+    JSON.stringify(leidaVenc)
+  );
+  const aceptaVencida = await api(`/api/quotes/${idVenc}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "accept" }),
+  });
+  ok(
+    "una 'vencida' se acepta igual — el estado guardado seguía siendo 'enviada'",
+    aceptaVencida.res.ok && aceptaVencida.json?.quote?.status === "aceptada"
+  );
+
+  console.log("\n== 019: webhook saliente hacia n8n (US4) ==");
+  const n8nUrl = process.env.QUOTES_N8N_WEBHOOK_URL;
+  const n8nMockUp = await fetch(`${BASE}/api/dev/n8n-mock/inbox`).catch(() => null);
+  if (!n8nUrl || !n8nMockUp?.ok) {
+    console.log(
+      "  (QUOTES_N8N_WEBHOOK_URL sin configurar hacia el mock: se omiten los checks del webhook)"
+    );
+  } else {
+    await fetch(`${BASE}/api/dev/n8n-mock/inbox`, { method: "DELETE" });
+
+    const paraWebhook = await api("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({
+        leadId: lead.id,
+        items: [{ description: "Webhook check", quantity: 1, unitPriceCents: 12345 }],
+      }),
+    });
+    const idWebhook = paraWebhook.json?.quote?.id;
+    await api(`/api/quotes/${idWebhook}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "send" }),
+    });
+    await sleep(300);
+
+    let eventos =
+      (await (await fetch(`${BASE}/api/dev/n8n-mock/inbox`)).json())?.events ?? [];
+    const evEnviada = eventos.find(
+      (e) => e.body?.event === "quote.enviada" && e.body?.quote?.id === idWebhook
+    );
+    ok(
+      "n8n recibió el POST del evento 'quote.enviada'",
+      !!evEnviada,
+      JSON.stringify(eventos.map((e) => e.body?.event))
+    );
+    ok(
+      "el payload trae los renglones y el total, no solo el id",
+      evEnviada?.body?.quote?.totalCents === 12345 &&
+        evEnviada?.body?.quote?.items?.[0]?.description === "Webhook check",
+      JSON.stringify(evEnviada?.body?.quote)
+    );
+
+    const secret = process.env.QUOTES_N8N_WEBHOOK_SECRET;
+    if (secret && evEnviada) {
+      const { createHmac } = await import("node:crypto");
+      const firmaEsperada = `sha256=${createHmac("sha256", secret)
+        .update(evEnviada.raw)
+        .digest("hex")}`;
+      ok(
+        "la firma HMAC del body es verificable con el secreto configurado",
+        evEnviada.signature === firmaEsperada,
+        `esperada=${firmaEsperada} recibida=${evEnviada.signature}`
+      );
+    }
+
+    const trasEnviar = (await api(`/api/quotes/${idWebhook}`)).json?.quote;
+    ok(
+      "quote.webhookStatus queda 'sent'",
+      trasEnviar?.webhookStatus === "sent",
+      JSON.stringify(trasEnviar)
+    );
+
+    await api(`/api/quotes/${idWebhook}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "accept" }),
+    });
+    await sleep(300);
+    eventos =
+      (await (await fetch(`${BASE}/api/dev/n8n-mock/inbox`)).json())?.events ?? [];
+    ok(
+      "n8n también recibe 'quote.aceptada'",
+      eventos.some(
+        (e) => e.body?.event === "quote.aceptada" && e.body?.quote?.id === idWebhook
+      ),
+      JSON.stringify(eventos.map((e) => e.body?.event))
+    );
+
+    console.log("\n== 019: el receptor caído no cuesta la transición ==");
+    await fetch(`${BASE}/api/dev/n8n-mock/fail`, { method: "POST" });
+    const paraFallo = await api("/api/quotes", {
+      method: "POST",
+      body: JSON.stringify({
+        leadId: lead.id,
+        items: [{ description: "Con receptor caído", quantity: 1, unitPriceCents: 100 }],
+      }),
+    });
+    const idFallo = paraFallo.json?.quote?.id;
+    const enviarConFallo = await api(`/api/quotes/${idFallo}`, {
+      method: "PATCH",
+      body: JSON.stringify({ action: "send" }),
+    });
+    ok(
+      "con n8n caído, la transición de estado se confirma IGUAL",
+      enviarConFallo.res.ok && enviarConFallo.json?.quote?.status === "enviada",
+      JSON.stringify(enviarConFallo.json)
+    );
+    ok(
+      "…y queda registrada como 'failed', con el motivo legible",
+      enviarConFallo.json?.quote?.webhookStatus === "failed" &&
+        !!enviarConFallo.json?.quote?.webhookError,
+      JSON.stringify(enviarConFallo.json?.quote)
+    );
+    await fetch(`${BASE}/api/dev/n8n-mock/fail`, { method: "DELETE" });
+  }
+
+  // Multi-tenancy (US5 del guion) NO se ejercita aquí: el registro público se
+  // cierra tras la primera organización (ALLOW_SIGNUP), y este arnés no
+  // depende de esa variable para ninguna otra sección. La garantía —
+  // `organization_id` NOT NULL + `scoped()` en toda query de dominio, que es
+  // justo lo que usan `queries.ts` y `service.ts` de cotizaciones — está
+  // cubierta genéricamente en tests/unit/tenant.test.ts.
 }

@@ -1020,3 +1020,102 @@ export const capiSettings = pgTable(
   },
   (t) => [uniqueIndex("capi_settings_org_uq").on(t.organizationId)]
 );
+
+/* ============================================================
+ * 019 — Cotizaciones (detrás de la bandera QUOTES)
+ * ============================================================ */
+
+/**
+ * La cotización de un trato. `subtotalCents`/`totalCents` son DENORMALIZADOS
+ * a propósito: se recalculan en el servidor cada vez que cambia un renglón
+ * (`src/server/quotes/service.ts` es la única puerta que escribe aquí), y así
+ * la lista no necesita sumar los `quote_item` de cada fila para pintarse.
+ *
+ * `vencida` NO es un estado que se guarde: es `enviada` con `validUntil` en
+ * el pasado. Guardarlo exigiría un cron que hoy no existe en esta app
+ * in-process: se deriva al leer (`src/server/quotes/queries.ts`).
+ */
+export const quote = pgTable(
+  "quote",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    leadId: text("lead_id")
+      .notNull()
+      .references(() => lead.id, { onDelete: "cascade" }),
+    /** Denormalizado como en `lead_stage_event`: casi toda lectura lo quiere
+     *  sin el join extra hasta `lead`. */
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contact.id, { onDelete: "cascade" }),
+    status: text("status", {
+      enum: ["borrador", "enviada", "aceptada", "rechazada"],
+    })
+      .notNull()
+      .default("borrador"),
+    currency: text("currency").notNull(),
+    subtotalCents: integer("subtotal_cents").notNull().default(0),
+    discountCents: integer("discount_cents").notNull().default(0),
+    totalCents: integer("total_cents").notNull().default(0),
+    notes: text("notes"),
+    /** Hasta cuándo vale la cotización. NULL = sin vencimiento. */
+    validUntil: timestamp("valid_until"),
+    sentAt: timestamp("sent_at"),
+    /** Cuándo respondió el cliente (aceptada o rechazada). */
+    respondedAt: timestamp("responded_at"),
+    createdBy: text("created_by").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    /**
+     * Último intento de avisar al webhook saliente (n8n). Best-effort: un
+     * fallo aquí JAMÁS deshace la transición de estado — la cotización ya
+     * cambió, y esto es solo para que el operador vea que nadie se enteró del
+     * lado de afuera. No es una bitácora completa (un solo renglón, se
+     * sobreescribe en cada intento): para eso sería una tabla aparte, y esta
+     * feature no la necesita todavía.
+     */
+    webhookStatus: text("webhook_status", {
+      enum: ["pending", "sent", "failed", "skipped"],
+    })
+      .notNull()
+      .default("skipped"),
+    webhookError: text("webhook_error"),
+    webhookAttemptedAt: timestamp("webhook_attempted_at"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("quote_org_lead_idx").on(t.organizationId, t.leadId),
+    index("quote_org_status_idx").on(t.organizationId, t.status),
+  ]
+);
+
+/** Un renglón de la cotización. `totalCents` = `quantity * unitPriceCents`,
+ *  recalculado en el servidor — nunca confiado del cliente. */
+export const quoteItem = pgTable(
+  "quote_item",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    quoteId: text("quote_id")
+      .notNull()
+      .references(() => quote.id, { onDelete: "cascade" }),
+    description: text("description").notNull(),
+    quantity: integer("quantity").notNull().default(1),
+    unitPriceCents: integer("unit_price_cents").notNull(),
+    totalCents: integer("total_cents").notNull(),
+    position: integer("position").notNull().default(0),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("quote_item_org_quote_idx").on(
+      t.organizationId,
+      t.quoteId,
+      t.position
+    ),
+  ]
+);

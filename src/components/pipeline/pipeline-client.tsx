@@ -13,7 +13,13 @@ import {
   type DragEndEvent,
   type DragStartEvent,
 } from "@dnd-kit/core";
-import { MessageSquareText, Settings2, Trophy, XCircle } from "lucide-react";
+import {
+  FileText,
+  MessageSquareText,
+  Settings2,
+  Trophy,
+  XCircle,
+} from "lucide-react";
 import type { LossReason, PriorityValue, StageDto } from "@/lib/types";
 import { formatMoneyCents, sumable } from "@/lib/money";
 import { cn } from "@/lib/utils";
@@ -38,7 +44,12 @@ export type BoardLead = {
   priority: PriorityValue | null;
 };
 
-export function PipelineClient() {
+export function PipelineClient({
+  quotesEnabled = false,
+}: {
+  /** 019 — ¿esta instancia tiene cotizaciones? Lo decide el servidor. */
+  quotesEnabled?: boolean;
+}) {
   const [stages, setStages] = useState<StageDto[]>([]);
   const [currency, setCurrency] = useState("MXN");
   const [leads, setLeads] = useState<BoardLead[]>([]);
@@ -193,6 +204,7 @@ export function PipelineClient() {
                 key={stage.id}
                 stage={stage}
                 currency={currency}
+                quotesEnabled={quotesEnabled}
                 onEditAmount={setEditandoMonto}
                 onOpen={(l) => setAbiertoId(l.id)}
                 leads={leads
@@ -293,12 +305,14 @@ function StageColumn({
   stage,
   leads,
   currency,
+  quotesEnabled,
   onEditAmount,
   onOpen,
 }: {
   stage: StageDto;
   leads: BoardLead[];
   currency: string;
+  quotesEnabled: boolean;
   onEditAmount: (lead: BoardLead) => void;
   onOpen: (lead: BoardLead) => void;
 }) {
@@ -329,6 +343,7 @@ function StageColumn({
             key={lead.id}
             lead={lead}
             currency={currency}
+            quotesEnabled={quotesEnabled}
             onEditAmount={onEditAmount}
             onOpen={onOpen}
           />
@@ -373,11 +388,13 @@ function StageFooter({ leads, currency }: { leads: BoardLead[]; currency: string
 function DraggableLead({
   lead,
   currency,
+  quotesEnabled,
   onEditAmount,
   onOpen,
 }: {
   lead: BoardLead;
   currency: string;
+  quotesEnabled: boolean;
   onEditAmount: (lead: BoardLead) => void;
   onOpen: (lead: BoardLead) => void;
 }) {
@@ -406,7 +423,12 @@ function DraggableLead({
       aria-label={`Abrir el trato de ${lead.contact.name}`}
       className={cn(isDragging && "opacity-40")}
     >
-      <LeadCard lead={lead} currency={currency} onEditAmount={onEditAmount} />
+      <LeadCard
+        lead={lead}
+        currency={currency}
+        quotesEnabled={quotesEnabled}
+        onEditAmount={onEditAmount}
+      />
     </div>
   );
 }
@@ -415,11 +437,13 @@ function LeadCard({
   lead,
   currency,
   overlay = false,
+  quotesEnabled = false,
   onEditAmount,
 }: {
   lead: BoardLead;
   currency: string;
   overlay?: boolean;
+  quotesEnabled?: boolean;
   onEditAmount?: (lead: BoardLead) => void;
 }) {
   return (
@@ -451,6 +475,18 @@ function LeadCard({
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <MessageSquareText className="h-4 w-4" />
+          </Link>
+        )}
+        {/* 019 — atajo a las cotizaciones de este trato, sin abrir el cajón. */}
+        {!overlay && quotesEnabled && (
+          <Link
+            href={`/quotes?leadId=${lead.id}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            aria-label="Ver cotizaciones de este trato"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <FileText className="h-4 w-4" />
           </Link>
         )}
       </div>

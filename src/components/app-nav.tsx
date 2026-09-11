@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
   CalendarDays,
+  FileText,
   FlaskConical,
   Inbox,
   Kanban,
@@ -51,6 +52,13 @@ const LAB_ITEM: NavItem = {
   icon: FlaskConical,
 };
 
+/** 019 — "Cotizaciones" solo existe si esta instancia encendió QUOTES. */
+const QUOTES_ITEM: NavItem = {
+  href: "/quotes",
+  label: "Cotizaciones",
+  icon: FileText,
+};
+
 /**
  * Un renglón del menú, como el `side-item` del mockup de la landing: texto
  * semibold, esquinas de 9px y, activo, lavado del acento con tinta azul.
@@ -72,6 +80,7 @@ export function AppNav({
   commit,
   agenda = false,
   lab = false,
+  quotes = false,
   open = false,
   onClose,
 }: {
@@ -93,6 +102,8 @@ export function AppNav({
   /** ¿esta instancia tiene el Laboratorio encendido? Igual que `agenda`, lo
    * decide el servidor por prop. */
   lab?: boolean;
+  /** 019 — ¿esta instancia tiene cotizaciones encendidas? Igual que `agenda`. */
+  quotes?: boolean;
   /** Solo aplica por debajo de `lg`: en escritorio el lateral es fijo. */
   open?: boolean;
   onClose?: () => void;
@@ -121,11 +132,12 @@ export function AppNav({
 
   const sha = commit || BUILD_COMMIT;
   const settingsActive = pathname.startsWith("/settings");
-  // Citas va después de Pipeline: es el paso siguiente de un trato, no una
-  // sección aparte.
+  // Citas y Cotizaciones van después de Pipeline: son el paso siguiente de un
+  // trato, no una sección aparte.
   const items = [
     ...NAV.slice(0, 2),
     ...(agenda ? [AGENDA_ITEM] : []),
+    ...(quotes ? [QUOTES_ITEM] : []),
     ...NAV.slice(2),
     ...(lab ? [LAB_ITEM] : []),
   ];

@@ -47,6 +47,21 @@ const envSchema = z.object({
   // Apagado por defecto — sin el, la ruta /lab responde 404 y no aparece en
   // el menu. Ej.: LAB=on
   LAB: z.string().optional(),
+  // 019: módulo de cotizaciones. Apagado por defecto — sin el, /quotes y
+  // /api/quotes/* responden 404, no aparece en el menú ni en la tarjeta del
+  // lead. Ej.: QUOTES=on
+  QUOTES: z.string().optional(),
+  // 019: webhook saliente opcional hacia n8n (u otro receptor) cuando una
+  // cotización pasa a "enviada" o "aceptada". Sin ella, ese paso es un no-op
+  // silencioso — el módulo funciona completo sin n8n, como pide la
+  // soberanía del núcleo (II). No es un secreto que viva cifrado en BD
+  // porque, como BOT_API_KEY, lo fija quien despliega, no el negocio desde
+  // la UI.
+  QUOTES_N8N_WEBHOOK_URL: z.string().url().optional(),
+  // Firma HMAC-SHA256 opcional del body (header X-Vocero-Signature) para que
+  // n8n verifique que la llamada viene de este CRM. Sin ella, se manda sin
+  // firmar.
+  QUOTES_N8N_WEBHOOK_SECRET: z.string().optional(),
   // 015: bases de los conectores. Solo se sobreescriben para apuntar a los
   // mocks en el self-test; en producción se usan las reales.
   ZOOM_BASE_URL: z.string().url().default("https://api.zoom.us/v2"),

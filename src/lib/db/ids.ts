@@ -29,6 +29,9 @@ const prefixes = {
   adAttribution: "att",
   conversionEvent: "cve",
   capiSettings: "capi",
+  // 019 — cotizaciones
+  quote: "qt",
+  quoteItem: "qti",
 } as const;
 
 export type IdKind = keyof typeof prefixes;
