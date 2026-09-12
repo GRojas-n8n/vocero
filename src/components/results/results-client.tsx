@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useEvents } from "@/components/use-events";
 import { formatMoneyCents } from "@/lib/money";
 import { cn } from "@/lib/utils";
+import { SOURCE_LABELS } from "@/server/contact-source";
 
 /** Resultados — cuadro de mando del embudo. Espejo de `server/results/types.ts`. */
 
@@ -23,8 +24,10 @@ type FunnelSummary = {
   lost: number;
   closeRate: number | null;
   avgTicketCents: number | null;
+  wonAmountCents: number;
   pipelineValueCents: number;
   pipelineLeadCount: number;
+  expectedValueCents: number;
 };
 
 type AbandonmentRow = {
@@ -43,10 +46,43 @@ type AgingRow = {
   avgDaysInStage: number | null;
 };
 
+type StageFunnelRow = {
+  stageId: string;
+  stageName: string;
+  position: number;
+  kind: "open" | "won" | "lost";
+  enteredCount: number;
+  conversionFromPrevious: number | null;
+};
+
+type SourceRow = {
+  source: string;
+  newLeads: number;
+  won: number;
+  lost: number;
+  conversionRate: number | null;
+  wonAmountCents: number;
+};
+
+type AgentAppointmentSummary = {
+  enabled: boolean;
+  totalBooked: number;
+  aiBooked: number;
+  manualBooked: number;
+  aiSharePct: number | null;
+  completed: number;
+  noShow: number;
+  cancelled: number;
+  showRate: number | null;
+};
+
 type ResultsResponse = {
   summary: FunnelSummary;
   abandonment: AbandonmentRow[];
   aging: AgingRow[];
+  stageFunnel: StageFunnelRow[];
+  sources: SourceRow[];
+  agentAppointments: AgentAppointmentSummary;
 };
 
 const PRESETS: { value: RangePreset; label: string }[] = [
@@ -162,11 +198,20 @@ export function ResultsClient() {
         <>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
             <MetricCard label="Prospectos nuevos" value={String(data.summary.newLeads)} />
-            <MetricCard label="Tratos ganados" value={String(data.summary.won)} />
+            <MetricCard
+              label="Dinero ganado"
+              value={formatMoneyCents(data.summary.wonAmountCents, currency) ?? "—"}
+              hint={`${data.summary.won} tratos ganados`}
+            />
             <MetricCard
               label="Dinero en el embudo"
               value={formatMoneyCents(data.summary.pipelineValueCents, currency) ?? "—"}
               hint={`${data.summary.pipelineLeadCount} tratos abiertos`}
+            />
+            <MetricCard
+              label="Dinero esperado"
+              value={formatMoneyCents(data.summary.expectedValueCents, currency) ?? "—"}
+              hint="Ponderado por cercanía a ganar"
             />
             <MetricCard
               label="Tasa de cierre"
@@ -181,8 +226,33 @@ export function ResultsClient() {
               label="Ticket promedio"
               value={formatMoneyCents(data.summary.avgTicketCents, currency) ?? "—"}
             />
-            <MetricCard label="Tratos perdidos" value={String(data.summary.lost)} />
           </div>
+
+          <Card>
+            <CardHeader>
+              <CardTitle>Embudo de conversión</CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-col gap-3">
+              {data.stageFunnel.length === 0 ? (
+                <EmptyHint text="Sin etapas configuradas." />
+              ) : (
+                data.stageFunnel.map((row) => (
+                  <StageBar
+                    key={row.stageId}
+                    label={row.stageName}
+                    count={row.enteredCount}
+                    maxCount={Math.max(...data.stageFunnel.map((r) => r.enteredCount), 1)}
+                    detail={
+                      row.conversionFromPrevious === null
+                        ? undefined
+                        : `${Math.round(row.conversionFromPrevious * 100)}% de la etapa anterior`
+                    }
+                    tone={row.kind === "won" ? "won" : row.kind === "lost" ? "lost" : "default"}
+                  />
+                ))
+              )}
+            </CardContent>
+          </Card>
 
           <div className="grid gap-4 lg:grid-cols-2">
             <Card>
@@ -233,6 +303,71 @@ export function ResultsClient() {
               </CardContent>
             </Card>
           </div>
+
+          <div className="grid gap-4 lg:grid-cols-2">
+            <Card>
+              <CardHeader>
+                <CardTitle>Origen de prospectos</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-3">
+                {data.sources.length === 0 ? (
+                  <EmptyHint text="No hay prospectos nuevos en este rango." />
+                ) : (
+                  data.sources.map((row) => (
+                    <StageBar
+                      key={row.source}
+                      label={SOURCE_LABELS[row.source as keyof typeof SOURCE_LABELS] ?? row.source}
+                      count={row.newLeads}
+                      maxCount={Math.max(...data.sources.map((r) => r.newLeads), 1)}
+                      detail={
+                        row.conversionRate === null
+                          ? `${row.won} ganados · ${row.lost} perdidos`
+                          : `${Math.round(row.conversionRate * 100)}% de cierre · ${formatMoneyCents(row.wonAmountCents, currency) ?? "—"} ganados`
+                      }
+                    />
+                  ))
+                )}
+              </CardContent>
+            </Card>
+
+            {data.agentAppointments.enabled && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Citas agendadas por el agente</CardTitle>
+                </CardHeader>
+                <CardContent className="flex flex-col gap-4">
+                  {data.agentAppointments.totalBooked === 0 ? (
+                    <EmptyHint text="No hubo citas agendadas en este rango." />
+                  ) : (
+                    <div className="grid grid-cols-2 gap-3">
+                      <MiniStat
+                        label="Agendadas por IA"
+                        value={String(data.agentAppointments.aiBooked)}
+                        hint={
+                          data.agentAppointments.aiSharePct === null
+                            ? undefined
+                            : `${data.agentAppointments.aiSharePct}% del total`
+                        }
+                      />
+                      <MiniStat label="Agendadas a mano" value={String(data.agentAppointments.manualBooked)} />
+                      <MiniStat
+                        label="Tasa de asistencia"
+                        value={
+                          data.agentAppointments.showRate === null
+                            ? "—"
+                            : `${Math.round(data.agentAppointments.showRate * 100)}%`
+                        }
+                      />
+                      <MiniStat
+                        label="No-shows / canceladas"
+                        value={`${data.agentAppointments.noShow} / ${data.agentAppointments.cancelled}`}
+                      />
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+          </div>
         </>
       )}
     </div>
@@ -266,11 +401,13 @@ function StageBar({
   count,
   maxCount,
   detail,
+  tone = "default",
 }: {
   label: string;
   count: number;
   maxCount: number;
   detail?: string;
+  tone?: "default" | "won" | "lost";
 }) {
   const pct = maxCount > 0 ? Math.max((count / maxCount) * 100, count > 0 ? 4 : 0) : 0;
   return (
@@ -281,11 +418,24 @@ function StageBar({
       </div>
       <div className="h-2 w-full overflow-hidden rounded-full bg-secondary">
         <div
-          className={cn("h-full rounded-full bg-brand transition-[width]")}
+          className={cn(
+            "h-full rounded-full transition-[width]",
+            tone === "won" ? "bg-success" : tone === "lost" ? "bg-danger" : "bg-brand"
+          )}
           style={{ width: `${pct}%` }}
         />
       </div>
       {detail && <span className="text-xs text-text-3">{detail}</span>}
+    </div>
+  );
+}
+
+function MiniStat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 rounded-lg border border-border p-3">
+      <span className="text-[11px] font-semibold uppercase tracking-wide text-text-3">{label}</span>
+      <span className="text-[17px] font-bold leading-tight">{value}</span>
+      {hint && <span className="text-xs text-text-2">{hint}</span>}
     </div>
   );
 }

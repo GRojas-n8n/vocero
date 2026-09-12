@@ -1,6 +1,13 @@
 import { withAuth } from "@/lib/api";
 import { getBranding } from "@/server/branding";
-import { getAbandonment, getAging, getFunnelSummary } from "@/server/results/metrics";
+import {
+  getAbandonment,
+  getAgentAppointments,
+  getAging,
+  getFunnelSummary,
+  getLeadSources,
+  getStageFunnel,
+} from "@/server/results/metrics";
 import { resolveRange } from "@/server/results/range";
 import { RANGE_PRESETS, type RangePreset, type ResultsResponse } from "@/server/results/types";
 
@@ -26,12 +33,15 @@ export const GET = withAuth(async (session, req: Request) => {
 
   const branding = await getBranding(session.organizationId);
 
-  const [summary, abandonment, aging] = await Promise.all([
+  const [summary, abandonment, aging, stageFunnel, sources, agentAppointments] = await Promise.all([
     getFunnelSummary(session.organizationId, range, branding.currency),
     getAbandonment(session.organizationId, range, branding.currency),
     getAging(session.organizationId),
+    getStageFunnel(session.organizationId, range),
+    getLeadSources(session.organizationId, range, branding.currency),
+    getAgentAppointments(session.organizationId, range),
   ]);
 
-  const body: ResultsResponse = { summary, abandonment, aging };
+  const body: ResultsResponse = { summary, abandonment, aging, stageFunnel, sources, agentAppointments };
   return Response.json(body);
 });

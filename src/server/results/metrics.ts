@@ -1,8 +1,17 @@
-import { and, avg, count, eq, gte, isNotNull, lte, or, sql, sum } from "drizzle-orm";
+import { and, avg, count, countDistinct, eq, gte, isNotNull, lte, or, sql, sum } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
+import { agendaEnabled } from "@/server/agenda/flag";
 import { rangeBounds } from "./range";
-import type { AbandonmentRow, AgingRow, DateRange, FunnelSummary } from "./types";
+import type {
+  AbandonmentRow,
+  AgentAppointmentSummary,
+  AgingRow,
+  DateRange,
+  FunnelSummary,
+  SourceRow,
+  StageFunnelRow,
+} from "./types";
 
 /**
  * Mismo criterio que `lib/money.ts#sumable`: solo entra al total el monto
@@ -60,6 +69,24 @@ export async function getFunnelSummary(
       )
     );
 
+  const [wonAmountRow] = await db
+    .select({
+      value: sum(
+        sql`case when ${inBusinessCurrency(schema.lead.currency, businessCurrency)} then ${schema.lead.amountCents} else null end`
+      ),
+    })
+    .from(schema.lead)
+    .innerJoin(
+      schema.leadStageEvent,
+      and(
+        eq(schema.leadStageEvent.leadId, schema.lead.id),
+        eq(schema.leadStageEvent.toStageKind, "won"),
+        gte(schema.leadStageEvent.occurredAt, start),
+        lte(schema.leadStageEvent.occurredAt, end)
+      )
+    )
+    .where(scoped(schema.lead.organizationId, organizationId));
+
   const [ticketRow] = await db
     .select({ value: avg(schema.lead.amountCents) })
     .from(schema.lead)
@@ -102,6 +129,7 @@ export async function getFunnelSummary(
 
   const won = wonRow?.value ?? 0;
   const lost = lostRow?.value ?? 0;
+  const expectedValueCents = await getExpectedPipelineValue(organizationId, businessCurrency);
 
   return {
     range,
@@ -111,9 +139,59 @@ export async function getFunnelSummary(
     lost,
     closeRate: won + lost > 0 ? won / (won + lost) : null,
     avgTicketCents: ticketRow?.value != null ? Math.round(Number(ticketRow.value)) : null,
+    wonAmountCents: wonAmountRow?.value != null ? Number(wonAmountRow.value) : 0,
     pipelineValueCents: pipelineRow?.valueCents != null ? Number(pipelineRow.valueCents) : 0,
     pipelineLeadCount: pipelineRow?.leadCount ?? 0,
+    expectedValueCents,
   };
+}
+
+/**
+ * Dinero ESPERADO: snapshot AHORA, no depende del rango. Pondera el monto de
+ * cada lead abierto por qué tan cerca está su etapa de `won`, usando la
+ * POSICIÓN de la etapa entre las etapas abiertas del negocio (etapa 1 de 4 ⇒
+ * peso 25%, etapa 4 de 4 ⇒ peso 100%).
+ *
+ * Es una heurística deliberada v1 — no hay probabilidad de cierre capturada
+ * por nadie en ningún lado del producto — pero es la misma idea que "peso por
+ * etapa" de cualquier CRM de embudo, y degrada con gracia: sin monto
+ * capturado, ese lead simplemente no suma (mismo criterio que `avgTicketCents`).
+ */
+async function getExpectedPipelineValue(
+  organizationId: string,
+  businessCurrency: string
+): Promise<number> {
+  const db = getDb();
+
+  const openStages = await db
+    .select({ id: schema.pipelineStage.id, position: schema.pipelineStage.position })
+    .from(schema.pipelineStage)
+    .where(scoped(schema.pipelineStage.organizationId, organizationId, eq(schema.pipelineStage.kind, "open")))
+    .orderBy(schema.pipelineStage.position);
+  if (openStages.length === 0) return 0;
+
+  const weightByStageId = new Map(
+    openStages.map((s, i) => [s.id, (i + 1) / openStages.length])
+  );
+
+  const rows = await db
+    .select({
+      stageId: schema.lead.stageId,
+      valueCents: sum(
+        sql`case when ${inBusinessCurrency(schema.lead.currency, businessCurrency)} then ${schema.lead.amountCents} else null end`
+      ),
+    })
+    .from(schema.lead)
+    .innerJoin(schema.pipelineStage, eq(schema.pipelineStage.id, schema.lead.stageId))
+    .where(scoped(schema.lead.organizationId, organizationId, eq(schema.pipelineStage.kind, "open")))
+    .groupBy(schema.lead.stageId);
+
+  let total = 0;
+  for (const row of rows) {
+    const weight = weightByStageId.get(row.stageId) ?? 0;
+    total += Number(row.valueCents ?? 0) * weight;
+  }
+  return Math.round(total);
 }
 
 /** Por qué etapa salían los tratos perdidos en el rango, y con qué motivo. */
@@ -249,4 +327,204 @@ export async function getAging(organizationId: string): Promise<AgingRow[]> {
       };
     })
     .sort((a, b) => a.position - b.position);
+}
+
+/**
+ * Embudo etapa por etapa dentro del rango: cuántos leads ENTRARON a cada
+ * etapa (evento, no snapshot) y qué fracción de los que entraron a la etapa
+ * anterior llegó a esta — encadenado por `position`, incluyendo `won`/`lost`
+ * como el final natural del embudo.
+ *
+ * `enteredCount` cuenta leads DISTINTOS: un lead que retrocede y vuelve a
+ * entrar a la misma etapa en el rango no debe inflar el conteo.
+ */
+export async function getStageFunnel(
+  organizationId: string,
+  range: DateRange
+): Promise<StageFunnelRow[]> {
+  const db = getDb();
+  const { start, end } = rangeBounds(range);
+
+  const stages = await db
+    .select()
+    .from(schema.pipelineStage)
+    .where(scoped(schema.pipelineStage.organizationId, organizationId))
+    .orderBy(schema.pipelineStage.position);
+  if (stages.length === 0) return [];
+
+  const entries = await db
+    .select({
+      stageId: schema.leadStageEvent.toStageId,
+      enteredCount: countDistinct(schema.leadStageEvent.leadId),
+    })
+    .from(schema.leadStageEvent)
+    .where(
+      scoped(
+        schema.leadStageEvent.organizationId,
+        organizationId,
+        gte(schema.leadStageEvent.occurredAt, start),
+        lte(schema.leadStageEvent.occurredAt, end)
+      )
+    )
+    .groupBy(schema.leadStageEvent.toStageId);
+
+  const enteredByStage = new Map(entries.map((e) => [e.stageId, e.enteredCount]));
+
+  let previousCount: number | null = null;
+  return stages.map((stage) => {
+    const enteredCount = enteredByStage.get(stage.id) ?? 0;
+    const conversionFromPrevious =
+      previousCount === null ? null : previousCount > 0 ? enteredCount / previousCount : null;
+    previousCount = enteredCount;
+    return {
+      stageId: stage.id,
+      stageName: stage.name,
+      position: stage.position,
+      kind: stage.kind,
+      enteredCount,
+      conversionFromPrevious,
+    };
+  });
+}
+
+/** De dónde salieron los prospectos del rango, y qué tan bien cerraron. */
+export async function getLeadSources(
+  organizationId: string,
+  range: DateRange,
+  businessCurrency: string
+): Promise<SourceRow[]> {
+  const db = getDb();
+  const { start, end } = rangeBounds(range);
+  const sourceExpr = sql<string>`coalesce(${schema.contact.source}, 'desconocida')`;
+
+  const newLeadRows = await db
+    .select({ source: sourceExpr, newLeads: count() })
+    .from(schema.lead)
+    .innerJoin(schema.contact, eq(schema.contact.id, schema.lead.contactId))
+    .where(
+      scoped(
+        schema.lead.organizationId,
+        organizationId,
+        gte(schema.lead.createdAt, start),
+        lte(schema.lead.createdAt, end)
+      )
+    )
+    .groupBy(sourceExpr);
+
+  const outcomeRows = await db
+    .select({
+      source: sourceExpr,
+      kind: schema.leadStageEvent.toStageKind,
+      dealCount: count(),
+      amountCents: sum(
+        sql`case when ${inBusinessCurrency(schema.lead.currency, businessCurrency)} then ${schema.lead.amountCents} else null end`
+      ),
+    })
+    .from(schema.leadStageEvent)
+    .innerJoin(schema.lead, eq(schema.lead.id, schema.leadStageEvent.leadId))
+    .innerJoin(schema.contact, eq(schema.contact.id, schema.lead.contactId))
+    .where(
+      scoped(
+        schema.leadStageEvent.organizationId,
+        organizationId,
+        or(eq(schema.leadStageEvent.toStageKind, "won"), eq(schema.leadStageEvent.toStageKind, "lost")),
+        gte(schema.leadStageEvent.occurredAt, start),
+        lte(schema.leadStageEvent.occurredAt, end)
+      )
+    )
+    .groupBy(sourceExpr, schema.leadStageEvent.toStageKind);
+
+  const bySource = new Map<string, SourceRow>();
+  const get = (source: string): SourceRow => {
+    const existing = bySource.get(source);
+    if (existing) return existing;
+    const fresh: SourceRow = { source, newLeads: 0, won: 0, lost: 0, conversionRate: null, wonAmountCents: 0 };
+    bySource.set(source, fresh);
+    return fresh;
+  };
+
+  for (const row of newLeadRows) {
+    get(row.source).newLeads = row.newLeads;
+  }
+  for (const row of outcomeRows) {
+    const entry = get(row.source);
+    if (row.kind === "won") {
+      entry.won = row.dealCount;
+      entry.wonAmountCents = row.amountCents != null ? Number(row.amountCents) : 0;
+    } else if (row.kind === "lost") {
+      entry.lost = row.dealCount;
+    }
+  }
+
+  return Array.from(bySource.values())
+    .map((row) => ({
+      ...row,
+      conversionRate: row.won + row.lost > 0 ? row.won / (row.won + row.lost) : null,
+    }))
+    .sort((a, b) => b.newLeads - a.newLeads);
+}
+
+/**
+ * Citas agendadas por el agente de IA vs. a mano, dentro del rango.
+ *
+ * Vive en Resultados (vista core, sin bandera) pero LEE una tabla que solo
+ * tiene datos reales cuando `AGENDA` (015) está encendida en esta instancia
+ * — la migración se aplica siempre, así que la tabla existe y la query es
+ * segura de correr igual, simplemente no habrá filas. `enabled` es la señal
+ * explícita para que la UI decida si mostrar la sección o no.
+ */
+export async function getAgentAppointments(
+  organizationId: string,
+  range: DateRange
+): Promise<AgentAppointmentSummary> {
+  const enabled = agendaEnabled();
+  const empty: AgentAppointmentSummary = {
+    enabled,
+    totalBooked: 0,
+    aiBooked: 0,
+    manualBooked: 0,
+    aiSharePct: null,
+    completed: 0,
+    noShow: 0,
+    cancelled: 0,
+    showRate: null,
+  };
+  if (!enabled) return empty;
+
+  const db = getDb();
+  const { start, end } = rangeBounds(range);
+
+  const rows = await db
+    .select({
+      source: schema.booking.source,
+      status: schema.booking.status,
+      value: count(),
+    })
+    .from(schema.booking)
+    .where(
+      scoped(
+        schema.booking.organizationId,
+        organizationId,
+        eq(schema.booking.kind, "session"),
+        eq(schema.booking.isTest, false),
+        gte(schema.booking.createdAt, start),
+        lte(schema.booking.createdAt, end)
+      )
+    )
+    .groupBy(schema.booking.source, schema.booking.status);
+
+  const result = { ...empty };
+  for (const row of rows) {
+    result.totalBooked += row.value;
+    if (row.source === "ai") result.aiBooked += row.value;
+    else result.manualBooked += row.value;
+    if (row.status === "realizada") result.completed += row.value;
+    else if (row.status === "no_show") result.noShow += row.value;
+    else if (row.status === "cancelada") result.cancelled += row.value;
+  }
+  result.aiSharePct =
+    result.totalBooked > 0 ? Math.round((result.aiBooked / result.totalBooked) * 100) : null;
+  result.showRate =
+    result.completed + result.noShow > 0 ? result.completed / (result.completed + result.noShow) : null;
+  return result;
 }
