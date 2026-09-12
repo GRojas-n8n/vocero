@@ -29,6 +29,7 @@ export function AppShell({
   agenda = false,
   lab = false,
   quotes = false,
+  projects = false,
   children,
 }: {
   branding: Branding;
@@ -43,6 +44,8 @@ export function AppShell({
   lab?: boolean;
   /** 019 — ¿esta instancia tiene cotizaciones? Lo decide el servidor. */
   quotes?: boolean;
+  /** 021 — ¿esta instancia tiene proyectos? Lo decide el servidor. */
+  projects?: boolean;
   children: React.ReactNode;
 }) {
   const pathname = usePathname();
@@ -83,6 +86,7 @@ export function AppShell({
         agenda={agenda}
         lab={lab}
         quotes={quotes}
+        projects={projects}
         open={navOpen}
         onClose={() => setNavOpen(false)}
       />

@@ -15,6 +15,7 @@ import {
 } from "@dnd-kit/core";
 import {
   FileText,
+  FolderKanban,
   MessageSquareText,
   Settings2,
   Trophy,
@@ -46,9 +47,15 @@ export type BoardLead = {
 
 export function PipelineClient({
   quotesEnabled = false,
+  assetsEnabled = false,
+  projectsEnabled = false,
 }: {
   /** 019 — ¿esta instancia tiene cotizaciones? Lo decide el servidor. */
   quotesEnabled?: boolean;
+  /** 020 — ¿esta instancia tiene activos de cliente? Lo decide el servidor. */
+  assetsEnabled?: boolean;
+  /** 021 — ¿esta instancia tiene proyectos? Lo decide el servidor. */
+  projectsEnabled?: boolean;
 }) {
   const [stages, setStages] = useState<StageDto[]>([]);
   const [currency, setCurrency] = useState("MXN");
@@ -205,6 +212,7 @@ export function PipelineClient({
                 stage={stage}
                 currency={currency}
                 quotesEnabled={quotesEnabled}
+                projectsEnabled={projectsEnabled}
                 onEditAmount={setEditandoMonto}
                 onOpen={(l) => setAbiertoId(l.id)}
                 leads={leads
@@ -236,6 +244,7 @@ export function PipelineClient({
           lead={abierto}
           stages={stages}
           currency={currency}
+          assetsEnabled={assetsEnabled}
           onClose={() => setAbiertoId(null)}
           onMoveStage={(stageId) => moverDesdeCajon(abierto.id, stageId)}
           onAmount={(cents) => void guardarMonto(abierto.id, cents)}
@@ -306,6 +315,7 @@ function StageColumn({
   leads,
   currency,
   quotesEnabled,
+  projectsEnabled,
   onEditAmount,
   onOpen,
 }: {
@@ -313,6 +323,7 @@ function StageColumn({
   leads: BoardLead[];
   currency: string;
   quotesEnabled: boolean;
+  projectsEnabled: boolean;
   onEditAmount: (lead: BoardLead) => void;
   onOpen: (lead: BoardLead) => void;
 }) {
@@ -344,6 +355,7 @@ function StageColumn({
             lead={lead}
             currency={currency}
             quotesEnabled={quotesEnabled}
+            projectsEnabled={projectsEnabled}
             onEditAmount={onEditAmount}
             onOpen={onOpen}
           />
@@ -389,12 +401,14 @@ function DraggableLead({
   lead,
   currency,
   quotesEnabled,
+  projectsEnabled,
   onEditAmount,
   onOpen,
 }: {
   lead: BoardLead;
   currency: string;
   quotesEnabled: boolean;
+  projectsEnabled: boolean;
   onEditAmount: (lead: BoardLead) => void;
   onOpen: (lead: BoardLead) => void;
 }) {
@@ -427,6 +441,7 @@ function DraggableLead({
         lead={lead}
         currency={currency}
         quotesEnabled={quotesEnabled}
+        projectsEnabled={projectsEnabled}
         onEditAmount={onEditAmount}
       />
     </div>
@@ -438,12 +453,14 @@ function LeadCard({
   currency,
   overlay = false,
   quotesEnabled = false,
+  projectsEnabled = false,
   onEditAmount,
 }: {
   lead: BoardLead;
   currency: string;
   overlay?: boolean;
   quotesEnabled?: boolean;
+  projectsEnabled?: boolean;
   onEditAmount?: (lead: BoardLead) => void;
 }) {
   return (
@@ -487,6 +504,18 @@ function LeadCard({
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <FileText className="h-4 w-4" />
+          </Link>
+        )}
+        {/* 021 — atajo al proyecto de este trato, sin abrir el cajón. */}
+        {!overlay && projectsEnabled && (
+          <Link
+            href={`/projects?leadId=${lead.id}`}
+            onPointerDown={(e) => e.stopPropagation()}
+            onClick={(e) => e.stopPropagation()}
+            aria-label="Ver el proyecto de este trato"
+            className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
+          >
+            <FolderKanban className="h-4 w-4" />
           </Link>
         )}
       </div>

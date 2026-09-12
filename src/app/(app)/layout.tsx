@@ -9,6 +9,7 @@ import { resolveBuildCommit } from "@/lib/version";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { labEnabled } from "@/server/lab/flag";
 import { quotesEnabled } from "@/server/quotes/flag";
+import { projectsEnabled } from "@/server/projects/flag";
 
 export default async function AppLayout({
   children,
@@ -37,6 +38,7 @@ export default async function AppLayout({
       agenda={agendaEnabled()}
       lab={labEnabled()}
       quotes={quotesEnabled()}
+      projects={projectsEnabled()}
     >
       {children}
     </AppShell>

@@ -1002,6 +1002,8 @@ async function main() {
   await agendaChecks();
   await atribucionChecks();
   await quotesChecks();
+  await assetsChecks();
+  await projectsChecks();
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
@@ -2139,4 +2141,384 @@ async function quotesChecks() {
   // `organization_id` NOT NULL + `scoped()` en toda query de dominio, que es
   // justo lo que usan `queries.ts` y `service.ts` de cotizaciones — está
   // cubierta genéricamente en tests/unit/tenant.test.ts.
+}
+
+/* ============================================================
+ * 020 — Activos de cliente (tests/e2e/us-activos.md)
+ *
+ * Cubre las dos configuraciones de la bandera y —lo que más importa— que el
+ * secreto cifrado NUNCA viaja en una lista o lectura normal, solo por el
+ * endpoint dedicado a revelarlo, y que editar sin mandar `secret` no lo toca.
+ * ============================================================ */
+
+async function assetsChecks() {
+  const encendida = /^(on|1|true|si|sí|yes)$/i.test(
+    (process.env.ASSETS ?? "").trim()
+  );
+
+  console.log("\n== 020: la bandera de activos de cliente ==");
+
+  if (!encendida) {
+    const { res } = await api("/api/assets?leadId=x");
+    ok(
+      "GET /api/assets → 404 con ASSETS apagada",
+      res.status === 404,
+      `status=${res.status}`
+    );
+    const post = await api("/api/assets", {
+      method: "POST",
+      body: JSON.stringify({ leadId: "x", type: "domain", name: "x" }),
+    });
+    ok(
+      "POST /api/assets → 404 con ASSETS apagada",
+      post.res.status === 404,
+      `status=${post.res.status}`
+    );
+    const secret = await api("/api/assets/x/secret");
+    ok(
+      "GET /api/assets/[id]/secret → 404 con ASSETS apagada",
+      secret.res.status === 404,
+      `status=${secret.res.status}`
+    );
+    console.log("  (activos apagados: el resto de los checks de 020 no aplican)");
+    return;
+  }
+
+  console.log("\n== 020: alta de un lead para colgarle activos ==");
+  const SUF = String(Date.now()).slice(-6);
+  const NOMBRE = `Lead activos ${SUF}`;
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: `52156${SUF}9`,
+      name: NOMBRE,
+      text: "hola",
+      waMessageId: `wamid.e2e.020.${SUF}`,
+    }),
+  });
+  await sleep(1200);
+  const board = (await api("/api/pipeline/board")).json;
+  const lead = board?.leads?.find((l) => l.contact.name === NOMBRE);
+  ok("lead de prueba listo", !!lead);
+  if (!lead) return;
+
+  console.log("\n== 020: alta y lectura nunca exponen el secreto (US2) ==");
+  const sinNombre = await api("/api/assets", {
+    method: "POST",
+    body: JSON.stringify({ leadId: lead.id, type: "domain", name: "" }),
+  });
+  ok(
+    "crear sin nombre → 422",
+    sinNombre.res.status === 422,
+    `status=${sinNombre.res.status}`
+  );
+
+  const leadInexistente = await api("/api/assets", {
+    method: "POST",
+    body: JSON.stringify({ leadId: "ld_no_existe", type: "domain", name: "x" }),
+  });
+  ok(
+    "crear sobre un lead inexistente → 404",
+    leadInexistente.res.status === 404,
+    `status=${leadInexistente.res.status}`
+  );
+
+  const SECRETO = "clave-super-secreta-" + SUF;
+  const creado = await api("/api/assets", {
+    method: "POST",
+    body: JSON.stringify({
+      leadId: lead.id,
+      type: "wordpress",
+      name: "WP del cliente",
+      url: "https://ejemplo.test/wp-admin",
+      username: "admin",
+      secret: SECRETO,
+      notes: "acceso de prueba",
+    }),
+  });
+  ok(
+    "crear un activo con secreto responde 201",
+    creado.res.status === 201,
+    JSON.stringify(creado.json)
+  );
+  const assetId = creado.json?.asset?.id;
+  ok("hasSecret queda true", creado.json?.asset?.hasSecret === true);
+  ok(
+    "el secreto NUNCA viaja en la respuesta de creación",
+    !JSON.stringify(creado.json).includes(SECRETO),
+    "el body de creación contenía el texto plano"
+  );
+
+  const sinSecreto = await api("/api/assets", {
+    method: "POST",
+    body: JSON.stringify({ leadId: lead.id, type: "domain", name: "Dominio simple" }),
+  });
+  ok(
+    "un activo sin secreto queda con hasSecret=false",
+    sinSecreto.json?.asset?.hasSecret === false
+  );
+
+  const lista = (await api(`/api/assets?leadId=${lead.id}`)).json?.assets ?? [];
+  ok(
+    "la lista trae ambos activos, sin el campo `secret` en ninguno",
+    lista.length >= 2 && lista.every((a) => a.secret === undefined),
+    JSON.stringify(lista)
+  );
+  ok(
+    "…y sin el secreto en claro en ningún lado del payload",
+    !JSON.stringify(lista).includes(SECRETO),
+    "la lista contenía el texto plano"
+  );
+
+  console.log("\n== 020: revelar la clave es un endpoint aparte (US3) ==");
+  const revelado = await api(`/api/assets/${assetId}/secret`);
+  ok(
+    "GET .../secret devuelve el mismo texto plano que se guardó",
+    revelado.res.ok && revelado.json?.secret === SECRETO,
+    JSON.stringify(revelado.json)
+  );
+  const revelarSinSecreto = await api(
+    `/api/assets/${sinSecreto.json?.asset?.id}/secret`
+  );
+  ok(
+    "un activo sin secreto revela null, no error",
+    revelarSinSecreto.res.ok && revelarSinSecreto.json?.secret === null,
+    JSON.stringify(revelarSinSecreto.json)
+  );
+
+  console.log("\n== 020: editar sin tocar, borrar o reemplazar el secreto (US4) ==");
+  const editarNombre = await api(`/api/assets/${assetId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ name: "WP del cliente (renombrado)" }),
+  });
+  ok(
+    "editar sin mandar `secret` no lo toca",
+    editarNombre.res.ok && editarNombre.json?.asset?.hasSecret === true,
+    JSON.stringify(editarNombre.json)
+  );
+  const trasEditar = (await api(`/api/assets/${assetId}/secret`)).json?.secret;
+  ok(
+    "…el valor descifrado sigue siendo el mismo",
+    trasEditar === SECRETO,
+    `obtuve=${trasEditar}`
+  );
+
+  const borrarSecreto = await api(`/api/assets/${assetId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ secret: null }),
+  });
+  ok(
+    "PATCH con secret:null lo borra",
+    borrarSecreto.res.ok && borrarSecreto.json?.asset?.hasSecret === false,
+    JSON.stringify(borrarSecreto.json)
+  );
+  const trasBorrar = (await api(`/api/assets/${assetId}/secret`)).json?.secret;
+  ok("…y revela null", trasBorrar === null, `obtuve=${trasBorrar}`);
+
+  const NUEVO_SECRETO = "otra-clave-" + SUF;
+  await api(`/api/assets/${assetId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ secret: NUEVO_SECRETO }),
+  });
+  const trasReemplazar = (await api(`/api/assets/${assetId}/secret`)).json?.secret;
+  ok(
+    "re-asignar `secret` re-cifra con el nuevo valor",
+    trasReemplazar === NUEVO_SECRETO,
+    `obtuve=${trasReemplazar}`
+  );
+
+  console.log("\n== 020: borrar (US5) ==");
+  const borrado = await api(`/api/assets/${assetId}`, { method: "DELETE" });
+  ok("borrar responde ok", borrado.res.ok, JSON.stringify(borrado.json));
+  const leerBorrado = await api(`/api/assets/${assetId}`);
+  ok(
+    "leerlo después → 404",
+    leerBorrado.res.status === 404,
+    `status=${leerBorrado.res.status}`
+  );
+}
+
+/* ============================================================
+ * 021 — Proyectos e hitos (tests/e2e/us-proyectos.md)
+ *
+ * Cubre las dos configuraciones de la bandera y, sobre todo, que aceptar una
+ * cotización abre el proyecto y sus 4 hitos EN LA MISMA operación — no una
+ * cola aparte que pueda quedar a medias.
+ * ============================================================ */
+
+async function projectsChecks() {
+  const encendida = /^(on|1|true|si|sí|yes)$/i.test(
+    (process.env.PROJECTS ?? "").trim()
+  );
+
+  console.log("\n== 021: la bandera de proyectos ==");
+
+  if (!encendida) {
+    const { res } = await api("/api/projects");
+    ok(
+      "GET /api/projects → 404 con PROJECTS apagada",
+      res.status === 404,
+      `status=${res.status}`
+    );
+    const patch = await api("/api/projects/x", {
+      method: "PATCH",
+      body: JSON.stringify({ status: "in_progress" }),
+    });
+    ok(
+      "PATCH /api/projects/[id] → 404 con PROJECTS apagada",
+      patch.res.status === 404,
+      `status=${patch.res.status}`
+    );
+    const page = await fetch(`${BASE}/projects`, { headers: { cookie } });
+    ok("la pantalla /projects no existe", page.status === 404, `status=${page.status}`);
+    console.log("  (proyectos apagados: el resto de los checks de 021 no aplican)");
+    return;
+  }
+
+  const quotesOn = /^(on|1|true|si|sí|yes)$/i.test(
+    (process.env.QUOTES ?? "").trim()
+  );
+  if (!quotesOn) {
+    console.log(
+      "  (QUOTES apagada: la automatización de 021 no tiene de dónde nacer, se omite)"
+    );
+    return;
+  }
+
+  console.log("\n== 021: alta de un lead sin proyecto todavía (US4) ==");
+  const SUF = String(Date.now()).slice(-6);
+  const NOMBRE = `Lead proyecto ${SUF}`;
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: `52157${SUF}9`,
+      name: NOMBRE,
+      text: "hola",
+      waMessageId: `wamid.e2e.021.${SUF}`,
+    }),
+  });
+  await sleep(1200);
+  const board = (await api("/api/pipeline/board")).json;
+  const lead = board?.leads?.find((l) => l.contact.name === NOMBRE);
+  ok("lead de prueba listo", !!lead);
+  if (!lead) return;
+
+  const sinProyecto =
+    (await api(`/api/projects?leadId=${lead.id}`)).json?.projects ?? [];
+  ok(
+    "sin cotización aceptada, no hay proyecto para este trato",
+    sinProyecto.length === 0,
+    JSON.stringify(sinProyecto)
+  );
+
+  console.log("\n== 021: aceptar una cotización abre el proyecto, automático (US2) ==");
+  const cotizacion = await api("/api/quotes", {
+    method: "POST",
+    body: JSON.stringify({
+      leadId: lead.id,
+      items: [{ description: "Sitio nuevo", quantity: 1, unitPriceCents: 500000 }],
+    }),
+  });
+  const quoteId = cotizacion.json?.quote?.id;
+  await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "send" }),
+  });
+  const aceptada = await api(`/api/quotes/${quoteId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ action: "accept" }),
+  });
+  ok("aceptar la cotización responde ok", aceptada.res.ok, JSON.stringify(aceptada.json));
+
+  const proyectos =
+    (await api(`/api/projects?leadId=${lead.id}`)).json?.projects ?? [];
+  ok(
+    "nace exactamente un proyecto para ese trato",
+    proyectos.length === 1,
+    JSON.stringify(proyectos)
+  );
+  const proyecto = proyectos[0];
+  ok(
+    "vinculado a la cotización y con su presupuesto/moneda",
+    proyecto?.quoteId === quoteId &&
+      proyecto?.leadId === lead.id &&
+      proyecto?.budgetCents === 500000 &&
+      proyecto?.status === "planning",
+    JSON.stringify(proyecto)
+  );
+  ok(
+    "trae los 4 hitos fijos, en orden y pendientes",
+    JSON.stringify(proyecto?.milestones?.map((m) => m.title)) ===
+      JSON.stringify([
+        "Recopilación de accesos y materiales",
+        "Desarrollo en entorno de Staging / Coolify",
+        "Revisión y ajustes del cliente",
+        "Lanzamiento en Producción",
+      ]) && proyecto?.milestones?.every((m) => m.status === "pending"),
+    JSON.stringify(proyecto?.milestones)
+  );
+
+  const enListaGeneral = (await api("/api/projects")).json?.projects ?? [];
+  ok(
+    "también aparece en la lista general (sin filtro)",
+    enListaGeneral.some((p) => p.id === proyecto.id)
+  );
+
+  console.log("\n== 021: seguimiento del proyecto y sus hitos (US3) ==");
+  const cambioEstado = await api(`/api/projects/${proyecto.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "in_progress" }),
+  });
+  ok(
+    "cambiar el estado del proyecto",
+    cambioEstado.res.ok && cambioEstado.json?.project?.status === "in_progress",
+    JSON.stringify(cambioEstado.json)
+  );
+  const estadoInvalido = await api(`/api/projects/${proyecto.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ status: "no_existe" }),
+  });
+  ok(
+    "un estado fuera del enum → 422",
+    estadoInvalido.res.status === 422,
+    `status=${estadoInvalido.res.status}`
+  );
+
+  const hito1 = proyecto.milestones[0];
+  const avance1 = await api(
+    `/api/projects/${proyecto.id}/milestones/${hito1.id}`,
+    { method: "PATCH", body: JSON.stringify({ status: "in_progress" }) }
+  );
+  ok(
+    "avanzar un hito a en curso",
+    avance1.res.ok &&
+      avance1.json?.project?.milestones?.find((m) => m.id === hito1.id)?.status ===
+        "in_progress",
+    JSON.stringify(avance1.json)
+  );
+  const avance2 = await api(
+    `/api/projects/${proyecto.id}/milestones/${hito1.id}`,
+    { method: "PATCH", body: JSON.stringify({ status: "completed" }) }
+  );
+  const hitosTrasAvance = avance2.json?.project?.milestones ?? [];
+  ok(
+    "…y a completado, sin tocar los demás hitos",
+    hitosTrasAvance.find((m) => m.id === hito1.id)?.status === "completed" &&
+      hitosTrasAvance
+        .filter((m) => m.id !== hito1.id)
+        .every((m) => m.status === "pending"),
+    JSON.stringify(hitosTrasAvance)
+  );
+
+  const hitoAjeno = await api(
+    `/api/projects/${proyecto.id}/milestones/pms_no_existe`,
+    { method: "PATCH", body: JSON.stringify({ status: "completed" }) }
+  );
+  ok(
+    "un milestoneId que no pertenece a ese proyecto → 404",
+    hitoAjeno.res.status === 404,
+    `status=${hitoAjeno.res.status}`
+  );
 }

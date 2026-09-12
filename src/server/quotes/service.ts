@@ -4,6 +4,8 @@ import { newId } from "@/lib/db/ids";
 import { scoped } from "@/lib/db/tenant";
 import { getQuote, leadForQuote, type QuoteDetail } from "@/server/quotes/queries";
 import { notifyQuoteWebhook } from "@/server/quotes/webhook";
+import { projectsEnabled } from "@/server/projects/flag";
+import { createProjectFromQuote } from "@/server/projects/service";
 
 /**
  * 019 — CRUD y máquina de estados de cotizaciones.
@@ -252,24 +254,41 @@ export async function changeQuoteStatus(input: {
 
   const db = getDb();
   const now = new Date();
-  await db
-    .update(schema.quote)
-    .set({
-      status: transition.to,
-      sentAt: transition.to === "enviada" ? now : undefined,
-      respondedAt:
-        transition.to === "aceptada" || transition.to === "rechazada"
-          ? now
-          : undefined,
-      updatedAt: now,
-    })
-    .where(
-      scoped(
-        schema.quote.organizationId,
-        input.organizationId,
-        eq(schema.quote.id, input.quoteId)
-      )
-    );
+  await db.transaction(async (tx) => {
+    await tx
+      .update(schema.quote)
+      .set({
+        status: transition.to,
+        sentAt: transition.to === "enviada" ? now : undefined,
+        respondedAt:
+          transition.to === "aceptada" || transition.to === "rechazada"
+            ? now
+            : undefined,
+        updatedAt: now,
+      })
+      .where(
+        scoped(
+          schema.quote.organizationId,
+          input.organizationId,
+          eq(schema.quote.id, input.quoteId)
+        )
+      );
+
+    // 021 — Aceptar una cotización abre el proyecto de entrega EN LA MISMA
+    // transacción: si algo de esto fallara, la cotización tampoco debe quedar
+    // "aceptada" sin su proyecto. Detrás de la bandera PROJECTS — apagada, no
+    // pasa nada más que el cambio de estado de siempre.
+    if (transition.to === "aceptada" && projectsEnabled()) {
+      await createProjectFromQuote(tx, {
+        organizationId: input.organizationId,
+        leadId: quote.leadId,
+        quoteId: quote.id,
+        contactName: quote.contactName,
+        budgetCents: quote.totalCents,
+        currency: quote.currency,
+      });
+    }
+  });
 
   const updated = await getQuote(input.organizationId, input.quoteId);
   if (!updated) throw new Error("la cotización actualizada no se pudo leer");

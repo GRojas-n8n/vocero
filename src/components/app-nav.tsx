@@ -7,6 +7,7 @@ import {
   CalendarDays,
   FileText,
   FlaskConical,
+  FolderKanban,
   Inbox,
   Kanban,
   LogOut,
@@ -59,6 +60,13 @@ const QUOTES_ITEM: NavItem = {
   icon: FileText,
 };
 
+/** 021 — "Proyectos" solo existe si esta instancia encendió PROJECTS. */
+const PROJECTS_ITEM: NavItem = {
+  href: "/projects",
+  label: "Proyectos",
+  icon: FolderKanban,
+};
+
 /**
  * Un renglón del menú, como el `side-item` del mockup de la landing: texto
  * semibold, esquinas de 9px y, activo, lavado del acento con tinta azul.
@@ -81,6 +89,7 @@ export function AppNav({
   agenda = false,
   lab = false,
   quotes = false,
+  projects = false,
   open = false,
   onClose,
 }: {
@@ -104,6 +113,8 @@ export function AppNav({
   lab?: boolean;
   /** 019 — ¿esta instancia tiene cotizaciones encendidas? Igual que `agenda`. */
   quotes?: boolean;
+  /** 021 — ¿esta instancia tiene proyectos encendidos? Igual que `agenda`. */
+  projects?: boolean;
   /** Solo aplica por debajo de `lg`: en escritorio el lateral es fijo. */
   open?: boolean;
   onClose?: () => void;
@@ -138,6 +149,7 @@ export function AppNav({
     ...NAV.slice(0, 2),
     ...(agenda ? [AGENDA_ITEM] : []),
     ...(quotes ? [QUOTES_ITEM] : []),
+    ...(projects ? [PROJECTS_ITEM] : []),
     ...NAV.slice(2),
     ...(lab ? [LAB_ITEM] : []),
   ];

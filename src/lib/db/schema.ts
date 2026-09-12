@@ -1119,3 +1119,127 @@ export const quoteItem = pgTable(
     ),
   ]
 );
+
+/* ============================================================
+ * 020 — Activos de cliente (detrás de la bandera ASSETS)
+ * ============================================================ */
+
+/**
+ * Infraestructura y credenciales del cliente (dominio, VPS, WordPress,
+ * GitHub, Cloudflare…), colgadas del trato. `secretCipher`/`secretIv`/
+ * `secretTag` son el MISMO mecanismo AES-256-GCM que el token de WhatsApp
+ * (`lib/crypto`, ver `src/server/whatsapp/credentials.ts`) — dos formas de
+ * guardar un secreto es una de más que auditar. Los tres viajan juntos: un
+ * activo puede no tener secreto (un dominio solo necesita URL), pero si lo
+ * tiene, los tres campos existen.
+ */
+export const clientAsset = pgTable(
+  "client_asset",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    leadId: text("lead_id")
+      .notNull()
+      .references(() => lead.id, { onDelete: "cascade" }),
+    type: text("type", {
+      enum: ["domain", "vps", "wordpress", "github", "cloudflare", "other"],
+    }).notNull(),
+    name: text("name").notNull(),
+    url: text("url"),
+    username: text("username"),
+    secretCipher: text("secret_cipher"),
+    secretIv: text("secret_iv"),
+    secretTag: text("secret_tag"),
+    /** Vencimiento del activo (dominio, certificado…). NULL = no aplica. */
+    expiresAt: timestamp("expires_at"),
+    notes: text("notes"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("client_asset_org_lead_idx").on(t.organizationId, t.leadId),
+    check(
+      "client_asset_secret_ck",
+      sql`(${t.secretCipher} IS NULL AND ${t.secretIv} IS NULL AND ${t.secretTag} IS NULL) OR (${t.secretCipher} IS NOT NULL AND ${t.secretIv} IS NOT NULL AND ${t.secretTag} IS NOT NULL)`
+    ),
+  ]
+);
+
+/* ============================================================
+ * 021 — Proyectos e hitos (detrás de la bandera PROJECTS)
+ * ============================================================ */
+
+/**
+ * El proyecto de entrega de un trato. Casi siempre nace SOLO —automático,
+ * dentro de la misma transacción que acepta una cotización
+ * (`src/server/quotes/service.ts`)—, pero `quoteId` es opcional porque un
+ * proyecto también puede abrirse a mano sin que haya cotización de por medio.
+ */
+export const project = pgTable(
+  "project",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    leadId: text("lead_id")
+      .notNull()
+      .references(() => lead.id, { onDelete: "cascade" }),
+    quoteId: text("quote_id").references(() => quote.id, {
+      onDelete: "set null",
+    }),
+    name: text("name").notNull(),
+    status: text("status", {
+      enum: ["planning", "in_progress", "review", "completed", "paused"],
+    })
+      .notNull()
+      .default("planning"),
+    /** En CENTAVOS ENTEROS, igual que `lead.amountCents` — nunca un float. */
+    budgetCents: integer("budget_cents"),
+    /** Moneda de `budgetCents`; heredada de la cotización que lo creó. NULL
+     *  si el proyecto no tiene presupuesto todavía. */
+    currency: text("currency"),
+    targetDate: timestamp("target_date"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("project_org_lead_idx").on(t.organizationId, t.leadId),
+    index("project_org_status_idx").on(t.organizationId, t.status),
+  ]
+);
+
+/**
+ * Un hito del proyecto. `position` (no `order`, palabra reservada de SQL)
+ * fija el orden de despliegue, igual que `quote_item.position`.
+ */
+export const projectMilestone = pgTable(
+  "project_milestone",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => project.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    status: text("status", {
+      enum: ["pending", "in_progress", "completed"],
+    })
+      .notNull()
+      .default("pending"),
+    position: integer("position").notNull().default(0),
+    dueDate: timestamp("due_date"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("project_milestone_org_project_idx").on(
+      t.organizationId,
+      t.projectId,
+      t.position
+    ),
+  ]
+);

@@ -10,6 +10,7 @@ import { ContactAvatar } from "@/components/avatar";
 import { FichaPanel } from "@/components/ficha-panel";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AssetsPanel } from "@/components/assets/assets-panel";
 import { PriorityPicker } from "./priority-picker";
 import type { BoardLead } from "./pipeline-client";
 
@@ -25,6 +26,7 @@ export function LeadDrawer({
   lead,
   stages,
   currency,
+  assetsEnabled = false,
   onClose,
   onMoveStage,
   onAmount,
@@ -34,6 +36,8 @@ export function LeadDrawer({
   stages: StageDto[];
   /** Moneda del negocio, para el lead que aún no tiene la suya. */
   currency: string;
+  /** 020 — ¿esta instancia tiene activos de cliente? Lo decide el servidor. */
+  assetsEnabled?: boolean;
   onClose: () => void;
   /** Pasa por el mismo camino que el arrastre: perder exige motivo. */
   onMoveStage: (stageId: string) => void;
@@ -252,6 +256,14 @@ export function LeadDrawer({
               })}
             </div>
           </section>
+
+          {/* 020 — Infraestructura y credenciales del cliente */}
+          {assetsEnabled && (
+            <section className="border-b p-4">
+              <p className="mb-2 kicker">Activos del cliente</p>
+              <AssetsPanel leadId={lead.id} />
+            </section>
+          )}
 
           {/* Qué se sabe */}
           <FichaPanel ficha={ficha} onSave={guardarFicha} />
