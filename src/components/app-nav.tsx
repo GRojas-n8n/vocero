@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  BarChart3,
   CalendarDays,
   FileText,
   FlaskConical,
@@ -35,6 +36,7 @@ type NavItem = {
 const NAV: NavItem[] = [
   { href: "/inbox", label: "Bandeja", icon: Inbox, badge: true },
   { href: "/pipeline", label: "Pipeline", icon: Kanban },
+  { href: "/resultados", label: "Resultados", icon: BarChart3 },
   { href: "/contacts", label: "Contactos", icon: Users },
   { href: "/agent", label: "Agente", icon: Sparkles },
 ];
@@ -143,14 +145,14 @@ export function AppNav({
 
   const sha = commit || BUILD_COMMIT;
   const settingsActive = pathname.startsWith("/settings");
-  // Citas y Cotizaciones van después de Pipeline: son el paso siguiente de un
-  // trato, no una sección aparte.
+  // Citas y Cotizaciones van después de Pipeline y Resultados: son el paso
+  // siguiente de un trato, no una sección aparte.
   const items = [
-    ...NAV.slice(0, 2),
+    ...NAV.slice(0, 3),
     ...(agenda ? [AGENDA_ITEM] : []),
     ...(quotes ? [QUOTES_ITEM] : []),
     ...(projects ? [PROJECTS_ITEM] : []),
-    ...NAV.slice(2),
+    ...NAV.slice(3),
     ...(lab ? [LAB_ITEM] : []),
   ];
 
