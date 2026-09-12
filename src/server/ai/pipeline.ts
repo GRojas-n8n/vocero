@@ -3,8 +3,9 @@ import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { scoped } from "@/lib/db/tenant";
 import { moveLeadToStage as moveLeadThroughHistory } from "@/server/leads/stage-history";
-import { getEnv, isAiConfigured } from "@/lib/env";
+import { getEnv } from "@/lib/env";
 import { chatJson, type ChatMessage } from "@/lib/ai";
+import { resolveAiConfig } from "@/server/ai/credentials";
 import { publish } from "@/server/events/bus";
 import { isWindowOpen } from "@/server/inbox/window";
 import { SendError, sendText } from "@/server/inbox/send";
@@ -156,8 +157,6 @@ async function historyAsChatMessages(
  * debounce 0 y sin pasar por el coalesce).
  */
 export async function runAgentTurn(conversationId: string): Promise<void> {
-  if (!isAiConfigured()) return;
-
   const db = getDb();
   const convRows = await db
     .select()
@@ -224,7 +223,8 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
     ...(await historyAsChatMessages(history)),
   ];
 
-  const result = await chatJson(agentActionSchema(agenda), messages);
+  const aiConfig = await resolveAiConfig(organizationId);
+  const result = await chatJson(agentActionSchema(agenda), messages, aiConfig);
   if (!result.ok) {
     if (result.error === "not_configured") return;
     // Fallo persistente del proveedor o salida imposible → escalar (FR-022).

@@ -1004,9 +1004,77 @@ async function main() {
   await quotesChecks();
   await assetsChecks();
   await projectsChecks();
+  await aiChecks();
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
+}
+
+/* ============================================================
+ * 022 — Token + modelo del proveedor LLM por organización
+ * (tests/e2e/us-ai.md), contra ai-mock.
+ * ============================================================ */
+
+async function aiChecks() {
+  console.log("\n== 022: token de IA por organización contra ai-mock ==");
+  const aiMockUp = await fetch(`${BASE}/api/dev/ai-mock/v1/chat/completions`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer sonda" },
+    body: JSON.stringify({ model: "sonda", messages: [{ role: "user", content: "hola" }] }),
+  }).catch(() => null);
+  if (!aiMockUp?.ok) {
+    console.log("  (ai-mock no disponible: se omiten los checks de Inteligencia)");
+    return;
+  }
+
+  await api("/api/settings/ai", { method: "DELETE" });
+  ok(
+    "sin configurar, la conexión no existe",
+    (await api("/api/settings/ai")).json?.connection === null
+  );
+
+  const malas = await api("/api/settings/ai", {
+    method: "PUT",
+    body: JSON.stringify({ token: "token-invalido", model: "modelo-e2e" }),
+  });
+  ok(
+    "el proveedor rechaza el token → NO se guarda (422)",
+    malas.res.status === 422,
+    `status=${malas.res.status}`
+  );
+  ok(
+    "…y la conexión sigue sin existir",
+    (await api("/api/settings/ai")).json?.connection === null
+  );
+
+  const buenas = await api("/api/settings/ai", {
+    method: "PUT",
+    body: JSON.stringify({
+      token: "token-bueno-e2e",
+      model: "modelo-e2e",
+      judgeModel: "modelo-juez-e2e",
+    }),
+  });
+  ok("token válido se guarda", buenas.res.ok, `status=${buenas.res.status}`);
+  ok(
+    "hacia el navegador solo salen los últimos 4 del token",
+    buenas.json?.connection?.tokenLast4 === "-e2e" &&
+      !JSON.stringify(buenas.json).includes("token-bueno-e2e"),
+    JSON.stringify(buenas.json)
+  );
+
+  const probar = await api("/api/settings/ai/test", { method: "POST", body: JSON.stringify({}) });
+  ok(
+    "«Probar» sin pegar nada reusa el token ya guardado",
+    probar.res.ok,
+    `status=${probar.res.status}`
+  );
+
+  await api("/api/settings/ai", { method: "DELETE" });
+  ok(
+    "«Quitar» borra la fila: la instancia vuelve a las variables de entorno",
+    (await api("/api/settings/ai")).json?.connection === null
+  );
 }
 
 /* ============================================================

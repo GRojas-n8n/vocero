@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { chatJson } from "@/lib/ai";
 import { buildJudgePrompt } from "@/server/ai/prompts";
+import { resolveAiConfig } from "@/server/ai/credentials";
 
 /** Veredicto estructurado del juez (FR-032, contrato ai.md). */
 export const Verdict = z.object({
@@ -28,6 +29,7 @@ export type JudgeOutcome =
  * visible en el reporte y excluido del score. La corrida continúa.
  */
 export async function judgeCase(input: {
+  organizationId: string;
   personaKey: string;
   transcript: { role: "cliente" | "agente"; text: string }[];
   kbText: string;
@@ -39,13 +41,14 @@ export async function judgeCase(input: {
     kbText: input.kbText,
     behaviorText: input.behaviorText,
   });
+  const aiConfig = await resolveAiConfig(input.organizationId, { judge: true });
   const result = await chatJson(
     Verdict,
     [
       { role: "system", content: system },
       { role: "user", content: user },
     ],
-    { judge: true }
+    { judge: true, ...aiConfig }
   );
   if (!result.ok) {
     // Diagnóstico operativo: el caso queda visible como judge_failed y aquí

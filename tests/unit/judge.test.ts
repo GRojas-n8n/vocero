@@ -6,6 +6,10 @@ vi.mock("@/lib/ai", () => ({
   chatJson: (...args: unknown[]) => chatJson(...args),
 }));
 
+vi.mock("@/server/ai/credentials", () => ({
+  resolveAiConfig: vi.fn(async () => ({})),
+}));
+
 import { computeScore, judgeCase } from "@/server/lab/judge";
 
 describe("judgeCase (FR-032)", () => {
@@ -18,6 +22,7 @@ describe("judgeCase (FR-032)", () => {
       raw: "{}",
     });
     const outcome = await judgeCase({
+      organizationId: "org_test",
       personaKey: "comprador_decidido",
       transcript: [{ role: "cliente", text: "hola" }],
       kbText: "kb",
@@ -35,6 +40,7 @@ describe("judgeCase (FR-032)", () => {
       detail: "no cumple el esquema (raw=...)",
     });
     const outcome = await judgeCase({
+      organizationId: "org_test",
       personaKey: "fuera_de_kb",
       transcript: [],
       kbText: "",

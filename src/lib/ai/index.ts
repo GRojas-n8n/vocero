@@ -68,9 +68,19 @@ function acquireSlot(): Promise<() => void> {
 export async function chatJson<T>(
   schema: z.ZodType<T>,
   messages: ChatMessage[],
-  opts?: { model?: string; judge?: boolean; timeoutMs?: number }
+  opts?: {
+    model?: string;
+    judge?: boolean;
+    timeoutMs?: number;
+    /** Token de organización: pisa `OPENROUTER_API_TOKEN` cuando se pasa. */
+    apiToken?: string;
+  }
 ): Promise<ChatJsonResult<T>> {
-  if (!isAiConfigured()) {
+  const orgToken = opts?.apiToken?.trim();
+  // isAiConfigured() lee process.env en vivo (no el getEnv() cacheado): sin
+  // token de organización, un token de entorno que cambie en runtime debe
+  // notarse en la siguiente llamada, no quedar pegado al primer valor leído.
+  if (!orgToken && !isAiConfigured()) {
     return {
       ok: false,
       error: "not_configured",
@@ -78,6 +88,7 @@ export async function chatJson<T>(
     };
   }
   const env = getEnv();
+  const apiToken = orgToken || env.OPENROUTER_API_TOKEN;
   const model =
     opts?.model ??
     (opts?.judge
@@ -107,7 +118,12 @@ export async function chatJson<T>(
               },
             ];
       try {
-        const raw = await callProvider(model, attemptMessages, opts?.timeoutMs);
+        const raw = await callProvider(
+          model,
+          attemptMessages,
+          opts?.timeoutMs,
+          apiToken
+        );
         const extracted = extractJson(raw);
         if (extracted === null) {
           lastDetail = `sin JSON extraíble (raw=${truncate(raw)})`;
@@ -148,7 +164,8 @@ export async function chatJson<T>(
 async function callProvider(
   model: string,
   messages: ChatMessage[],
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
+  apiToken?: string
 ): Promise<string> {
   const env = getEnv();
   const controller = new AbortController();
@@ -158,7 +175,7 @@ async function callProvider(
       method: "POST",
       headers: {
         // El token jamás se loguea; solo viaja en este header.
-        Authorization: `Bearer ${env.OPENROUTER_API_TOKEN}`,
+        Authorization: `Bearer ${apiToken ?? env.OPENROUTER_API_TOKEN}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ model, messages }),
@@ -184,6 +201,29 @@ async function callProvider(
     return content;
   } finally {
     clearTimeout(timer);
+  }
+}
+
+/**
+ * 022 — Prueba un token + modelo ANTES de guardarlos: una llamada real y
+ * barata al proveedor (un mensaje trivial, sin exigir JSON). Igual que el
+ * wizard de WhatsApp o el conector de Zoom, credenciales que no sirven jamás
+ * llegan a la base.
+ */
+export async function testAiCredentials(input: {
+  apiToken: string;
+  model: string;
+}): Promise<{ ok: true } | { ok: false; error: string }> {
+  try {
+    await callProvider(
+      input.model,
+      [{ role: "user", content: "Responde solo con la palabra: ok" }],
+      15_000,
+      input.apiToken
+    );
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 

@@ -594,6 +594,35 @@ export const agentProfile = pgTable(
   (t) => [uniqueIndex("agent_profile_org_uq").on(t.organizationId)]
 );
 
+/**
+ * 022 — Credenciales del proveedor LLM (OpenRouter-compatible) por
+ * organización: token + modelo, cifrados igual que WhatsApp/Zoom/Google. Sin
+ * fila, el runtime cae a las variables de entorno (`OPENROUTER_*`) — así una
+ * instancia recién desplegada sigue funcionando exactamente como hoy.
+ */
+export const aiCredentials = pgTable(
+  "ai_credentials",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    tokenCipher: text("token_cipher").notNull(),
+    tokenIv: text("token_iv").notNull(),
+    tokenTag: text("token_tag").notNull(),
+    model: text("model").notNull(),
+    /** Modelo del juez del Laboratorio; null ⇒ reusa `model`. */
+    judgeModel: text("judge_model"),
+    /** `error` SE ESCRIBE cuando el proveedor rechaza el token. */
+    status: text("status", { enum: ["connected", "error"] })
+      .notNull()
+      .default("connected"),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+    updatedAt: timestamp("updated_at").notNull().defaultNow(),
+  },
+  (t) => [uniqueIndex("ai_credentials_org_uq").on(t.organizationId)]
+);
+
 export const kbEntry = pgTable(
   "kb_entry",
   {

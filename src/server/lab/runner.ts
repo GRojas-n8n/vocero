@@ -128,6 +128,7 @@ async function runAllCases(
     );
 
     const outcome = await judgeCase({
+      organizationId,
       personaKey: persona.key,
       transcript,
       kbText,
