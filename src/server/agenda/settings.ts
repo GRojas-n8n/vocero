@@ -77,19 +77,7 @@ export async function getSettings(
   const row = rows[0];
   // Sin fila: la instancia recién encendida ya es usable.
   if (!row) return DEFAULT_CALENDAR_SETTINGS;
-
-  return {
-    weeklyHours: normalizeWeeklyHours(row.weeklyHours as WeeklyHours),
-    slotMinutes: row.slotMinutes,
-    bufferMinutes: row.bufferMinutes,
-    minNoticeHours: row.minNoticeHours,
-    maxDaysAhead: row.maxDaysAhead,
-    timezone: row.timezone,
-    // Un conector que ya no existe en el código (p. ej. venías de un fork) no
-    // puede dejar la agenda inservible: se degrada al soberano.
-    connector: isConnectorId(row.connector) ? row.connector : DEFAULT_CONNECTOR,
-    meetingLink: row.meetingLink,
-  };
+  return mapRow(row);
 }
 
 export class CalendarSettingsError extends Error {
@@ -112,78 +100,109 @@ export type CalendarSettingsInput = Partial<
   connector?: string;
 };
 
+/** Fila cruda → `CalendarSettings`; misma normalización que `getSettings`. */
+function mapRow(row: typeof schema.calendarSettings.$inferSelect): CalendarSettings {
+  return {
+    weeklyHours: normalizeWeeklyHours(row.weeklyHours as WeeklyHours),
+    slotMinutes: row.slotMinutes,
+    bufferMinutes: row.bufferMinutes,
+    minNoticeHours: row.minNoticeHours,
+    maxDaysAhead: row.maxDaysAhead,
+    timezone: row.timezone,
+    // Un conector que ya no existe en el código (p. ej. venías de un fork) no
+    // puede dejar la agenda inservible: se degrada al soberano.
+    connector: isConnectorId(row.connector) ? row.connector : DEFAULT_CONNECTOR,
+    meetingLink: row.meetingLink,
+  };
+}
+
+/**
+ * Lee y escribe dentro de LA MISMA transacción, con `FOR UPDATE` sobre la
+ * fila existente: dos guardados simultáneos (p. ej. dos pestañas de Ajustes)
+ * ya no pueden pisarse campos entre sí — el segundo espera a que el primero
+ * suelte el lock y parte de ESE resultado, no de una lectura obsoleta.
+ */
 export async function upsertSettings(
   organizationId: string,
   input: CalendarSettingsInput
 ): Promise<CalendarSettings> {
-  const current = await getSettings(organizationId);
-
-  const timezone = input.timezone ?? current.timezone;
-  // Una zona desconocida rompería el motor entero: se rechaza al guardar.
-  if (!isValidTimeZone(timezone)) {
-    throw new CalendarSettingsError(`Zona horaria desconocida: ${timezone}`);
-  }
-
-  const connector = input.connector ?? current.connector;
-  if (!isConnectorId(connector)) {
-    throw new CalendarSettingsError(`Conector desconocido: ${connector}`);
-  }
-
-  const next: CalendarSettings = {
-    weeklyHours: normalizeWeeklyHours(
-      input.weeklyHours !== undefined ? input.weeklyHours : current.weeklyHours
-    ),
-    slotMinutes: clampInt(
-      input.slotMinutes ?? current.slotMinutes,
-      LIMITS.slotMinutes.min,
-      LIMITS.slotMinutes.max
-    ),
-    bufferMinutes: clampInt(
-      input.bufferMinutes ?? current.bufferMinutes,
-      LIMITS.bufferMinutes.min,
-      LIMITS.bufferMinutes.max
-    ),
-    minNoticeHours: clampInt(
-      input.minNoticeHours ?? current.minNoticeHours,
-      LIMITS.minNoticeHours.min,
-      LIMITS.minNoticeHours.max
-    ),
-    maxDaysAhead: clampInt(
-      input.maxDaysAhead ?? current.maxDaysAhead,
-      LIMITS.maxDaysAhead.min,
-      LIMITS.maxDaysAhead.max
-    ),
-    timezone,
-    connector,
-    meetingLink: normalizeLink(
-      input.meetingLink !== undefined ? input.meetingLink : current.meetingLink
-    ),
-  };
-
   const db = getDb();
-  const values = {
-    weeklyHours: next.weeklyHours,
-    slotMinutes: next.slotMinutes,
-    bufferMinutes: next.bufferMinutes,
-    minNoticeHours: next.minNoticeHours,
-    maxDaysAhead: next.maxDaysAhead,
-    timezone: next.timezone,
-    connector: next.connector,
-    meetingLink: next.meetingLink,
-  };
-  await db
-    .insert(schema.calendarSettings)
-    .values({
-      id: newId("calendarSettings"),
-      organizationId,
-      ...values,
-    })
-    .onConflictDoUpdate({
-      target: schema.calendarSettings.organizationId,
-      set: { ...values, updatedAt: new Date() },
-    });
 
-  return next;
+  return db.transaction(async (tx) => {
+    const rows = await tx
+      .select()
+      .from(schema.calendarSettings)
+      .where(scoped(schema.calendarSettings.organizationId, organizationId))
+      .for("update")
+      .limit(1);
+    const current = rows[0] ? mapRow(rows[0]) : DEFAULT_CALENDAR_SETTINGS;
+
+    const timezone = input.timezone ?? current.timezone;
+    // Una zona desconocida rompería el motor entero: se rechaza al guardar.
+    if (!isValidTimeZone(timezone)) {
+      throw new CalendarSettingsError(`Zona horaria desconocida: ${timezone}`);
+    }
+
+    const connector = input.connector ?? current.connector;
+    if (!isConnectorId(connector)) {
+      throw new CalendarSettingsError(`Conector desconocido: ${connector}`);
+    }
+
+    const next: CalendarSettings = {
+      weeklyHours: normalizeWeeklyHours(
+        input.weeklyHours !== undefined ? input.weeklyHours : current.weeklyHours
+      ),
+      slotMinutes: clampInt(
+        input.slotMinutes ?? current.slotMinutes,
+        LIMITS.slotMinutes.min,
+        LIMITS.slotMinutes.max
+      ),
+      bufferMinutes: clampInt(
+        input.bufferMinutes ?? current.bufferMinutes,
+        LIMITS.bufferMinutes.min,
+        LIMITS.bufferMinutes.max
+      ),
+      minNoticeHours: clampInt(
+        input.minNoticeHours ?? current.minNoticeHours,
+        LIMITS.minNoticeHours.min,
+        LIMITS.minNoticeHours.max
+      ),
+      maxDaysAhead: clampInt(
+        input.maxDaysAhead ?? current.maxDaysAhead,
+        LIMITS.maxDaysAhead.min,
+        LIMITS.maxDaysAhead.max
+      ),
+      timezone,
+      connector,
+      meetingLink: normalizeLink(
+        input.meetingLink !== undefined ? input.meetingLink : current.meetingLink
+      ),
+    };
+
+    const values = {
+      weeklyHours: next.weeklyHours,
+      slotMinutes: next.slotMinutes,
+      bufferMinutes: next.bufferMinutes,
+      minNoticeHours: next.minNoticeHours,
+      maxDaysAhead: next.maxDaysAhead,
+      timezone: next.timezone,
+      connector: next.connector,
+      meetingLink: next.meetingLink,
+    };
+    await tx
+      .insert(schema.calendarSettings)
+      .values({
+        id: newId("calendarSettings"),
+        organizationId,
+        ...values,
+      })
+      .onConflictDoUpdate({
+        target: schema.calendarSettings.organizationId,
+        set: { ...values, updatedAt: new Date() },
+      });
+
+    return next;
+  });
 }
 
 /**
