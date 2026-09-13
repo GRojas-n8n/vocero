@@ -60,7 +60,8 @@ export function BrandTile({
   return (
     <span
       className={cn(
-        "brand-tile flex shrink-0 items-center justify-center overflow-hidden text-brand-fg",
+        "flex shrink-0 items-center justify-center overflow-hidden text-brand-fg",
+        !branding.favicon && "brand-tile",
         className
       )}
       aria-hidden
