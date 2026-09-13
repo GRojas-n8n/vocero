@@ -6,6 +6,7 @@ import { rangeBounds } from "./range";
 import type {
   AbandonmentRow,
   AgentAppointmentSummary,
+  AgentPerformanceSummary,
   AgingRow,
   DateRange,
   FunnelSummary,
@@ -26,10 +27,11 @@ function inBusinessCurrency(currencyColumn: typeof schema.lead.currency, busines
 export async function getFunnelSummary(
   organizationId: string,
   range: DateRange,
-  businessCurrency: string
+  businessCurrency: string,
+  tz: string
 ): Promise<FunnelSummary> {
   const db = getDb();
-  const { start, end } = rangeBounds(range);
+  const { start, end } = rangeBounds(range, tz);
 
   const [newLeadsRow] = await db
     .select({ value: count() })
@@ -198,10 +200,11 @@ async function getExpectedPipelineValue(
 export async function getAbandonment(
   organizationId: string,
   range: DateRange,
-  businessCurrency: string
+  businessCurrency: string,
+  tz: string
 ): Promise<AbandonmentRow[]> {
   const db = getDb();
-  const { start, end } = rangeBounds(range);
+  const { start, end } = rangeBounds(range, tz);
 
   const rows = await db
     .select({
@@ -340,10 +343,11 @@ export async function getAging(organizationId: string): Promise<AgingRow[]> {
  */
 export async function getStageFunnel(
   organizationId: string,
-  range: DateRange
+  range: DateRange,
+  tz: string
 ): Promise<StageFunnelRow[]> {
   const db = getDb();
-  const { start, end } = rangeBounds(range);
+  const { start, end } = rangeBounds(range, tz);
 
   const stages = await db
     .select()
@@ -391,10 +395,11 @@ export async function getStageFunnel(
 export async function getLeadSources(
   organizationId: string,
   range: DateRange,
-  businessCurrency: string
+  businessCurrency: string,
+  tz: string
 ): Promise<SourceRow[]> {
   const db = getDb();
-  const { start, end } = rangeBounds(range);
+  const { start, end } = rangeBounds(range, tz);
   const sourceExpr = sql<string>`coalesce(${schema.contact.source}, 'desconocida')`;
 
   const newLeadRows = await db
@@ -475,7 +480,8 @@ export async function getLeadSources(
  */
 export async function getAgentAppointments(
   organizationId: string,
-  range: DateRange
+  range: DateRange,
+  tz: string
 ): Promise<AgentAppointmentSummary> {
   const enabled = agendaEnabled();
   const empty: AgentAppointmentSummary = {
@@ -492,7 +498,7 @@ export async function getAgentAppointments(
   if (!enabled) return empty;
 
   const db = getDb();
-  const { start, end } = rangeBounds(range);
+  const { start, end } = rangeBounds(range, tz);
 
   const rows = await db
     .select({
@@ -527,4 +533,90 @@ export async function getAgentAppointments(
   result.showRate =
     result.completed + result.noShow > 0 ? result.completed / (result.completed + result.noShow) : null;
   return result;
+}
+
+/**
+ * Umbral de "respuesta a tiempo": el coalesce de turno ya espera
+ * `AGENT_COALESCE_MS` (default 6s) antes de generar la respuesta, así que 5
+ * minutos deja margen de sobra para el LLM/reintentos sin dejar de ser un SLA
+ * exigente de verdad para WhatsApp.
+ */
+const ON_TIME_THRESHOLD_MS = 5 * 60_000;
+
+/**
+ * Desempeño del agente: % de ráfagas de mensajes entrantes que la IA
+ * respondió dentro del umbral, y cuántas conversaciones reales escalaron a un
+ * humano (`conversation.handoff_at`) en el rango.
+ *
+ * La latencia se mide por RÁFAGA, no por mensaje individual: varios entrantes
+ * seguidos que el coalesce agrupa en un solo turno cuentan como una sola
+ * respuesta, medida desde el PRIMER entrante sin contestar — igual a como el
+ * agente realmente opera (`server/ai/pipeline.ts`).
+ */
+export async function getAgentPerformance(
+  organizationId: string,
+  range: DateRange,
+  tz: string
+): Promise<AgentPerformanceSummary> {
+  const db = getDb();
+  const { start, end } = rangeBounds(range, tz);
+
+  const [handoffRow] = await db
+    .select({ value: count() })
+    .from(schema.conversation)
+    .where(
+      scoped(
+        schema.conversation.organizationId,
+        organizationId,
+        eq(schema.conversation.isTest, false),
+        isNotNull(schema.conversation.handoffAt),
+        gte(schema.conversation.handoffAt, start),
+        lte(schema.conversation.handoffAt, end)
+      )
+    );
+
+  const rows = await db
+    .select({
+      conversationId: schema.message.conversationId,
+      direction: schema.message.direction,
+      aiGenerated: schema.message.aiGenerated,
+      createdAt: schema.message.createdAt,
+    })
+    .from(schema.message)
+    .innerJoin(schema.conversation, eq(schema.conversation.id, schema.message.conversationId))
+    .where(
+      scoped(
+        schema.message.organizationId,
+        organizationId,
+        eq(schema.conversation.isTest, false),
+        gte(schema.message.createdAt, start),
+        lte(schema.message.createdAt, end)
+      )
+    )
+    .orderBy(schema.message.conversationId, schema.message.createdAt);
+
+  let totalResponses = 0;
+  let onTime = 0;
+  let currentConversationId: string | null = null;
+  let pendingInboundAt: number | null = null;
+  for (const row of rows) {
+    if (row.conversationId !== currentConversationId) {
+      currentConversationId = row.conversationId;
+      pendingInboundAt = null;
+    }
+    if (row.direction === "in") {
+      if (pendingInboundAt === null) pendingInboundAt = row.createdAt.getTime();
+    } else if (row.aiGenerated && pendingInboundAt !== null) {
+      const latency = row.createdAt.getTime() - pendingInboundAt;
+      totalResponses += 1;
+      if (latency <= ON_TIME_THRESHOLD_MS) onTime += 1;
+      pendingInboundAt = null;
+    }
+  }
+
+  return {
+    totalResponses,
+    onTimePct: totalResponses > 0 ? Math.round((onTime / totalResponses) * 100) : null,
+    handoffs: handoffRow?.value ?? 0,
+  };
 }

@@ -1,28 +1,23 @@
+import { addDaysISO, todayInTz, zonedWallClockToUtc } from "@/lib/time/slots";
 import type { DateRange, RangePreset } from "./types";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
-/** yyyy-mm-dd de un Date, en UTC. */
-function isoDate(d: Date): string {
-  return d.toISOString().slice(0, 10);
-}
-
 /**
- * Resuelve un preset (o un rango `custom` explícito) a fechas concretas.
- *
- * Simplificación deliberada v1: los límites de "este mes" / "mes pasado" se
- * calculan en UTC, no en el timezone del negocio. `calendar_settings.timezone`
- * pertenece a la agenda (bandera `AGENDA`) y Resultados es una vista core que
- * no depende de que esa bandera esté encendida — acoplarlas sería peor que el
- * desvío de unas horas en el borde del mes.
+ * Resuelve un preset (o un rango `custom` explícito) a fechas concretas, en
+ * la zona horaria del negocio (`calendar_settings.timezone`, con default
+ * `America/Mexico_City`). "Hoy", "este mes" y "mes pasado" son conceptos de
+ * calendario de PARED — calcularlos en UTC corre el borde del mes/día unas
+ * horas, lo que en la práctica mete o saca movimientos reales del reporte.
  */
 export function resolveRange(
   preset: RangePreset,
   customFrom: string | null,
   customTo: string | null,
+  tz: string,
   now: Date = new Date()
 ): DateRange {
-  const today = isoDate(now);
+  const today = todayInTz(now, tz);
 
   if (preset === "custom") {
     const from = customFrom && ISO_DATE.test(customFrom) ? customFrom : today;
@@ -31,25 +26,39 @@ export function resolveRange(
   }
 
   if (preset === "this_month") {
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
-    return { preset, from: isoDate(start), to: today };
+    const start = `${today.slice(0, 7)}-01`;
+    return { preset, from: start, to: today };
   }
 
   if (preset === "last_month") {
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1));
-    const end = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 0));
-    return { preset, from: isoDate(start), to: isoDate(end) };
+    const [y, m] = today.split("-").map(Number) as [number, number];
+    // Día 0 del mes actual (UTC, aritmética de calendario pura) = último día del mes pasado.
+    const lastMonthEnd = new Date(Date.UTC(y, m - 1, 0));
+    const lastMonthStart = new Date(Date.UTC(y, m - 2, 1));
+    return {
+      preset,
+      from: lastMonthStart.toISOString().slice(0, 10),
+      to: lastMonthEnd.toISOString().slice(0, 10),
+    };
   }
 
   const days = preset === "7d" ? 7 : preset === "90d" ? 90 : 30;
-  const start = new Date(now.getTime() - (days - 1) * 24 * 60 * 60 * 1000);
-  return { preset, from: isoDate(start), to: today };
+  return { preset, from: addDaysISO(today, -(days - 1)), to: today };
 }
 
-/** Límites UTC [from 00:00:00, to 23:59:59.999] para un WHERE `BETWEEN`. */
-export function rangeBounds(range: DateRange): { start: Date; end: Date } {
+/**
+ * Límites UTC [00:00 del `from`, 00:00 del día siguiente a `to`) en la zona
+ * del negocio, para un WHERE `>= start AND < ... `/`<= end`. Si la zona
+ * resultara inválida (no debería: `upsertSettings` la valida al guardar) cae
+ * a un límite UTC simple en vez de tronar el reporte.
+ */
+export function rangeBounds(range: DateRange, tz: string): { start: Date; end: Date } {
+  const start = zonedWallClockToUtc(range.from, "00:00", tz);
+  const nextDayStart = zonedWallClockToUtc(addDaysISO(range.to, 1), "00:00", tz);
   return {
-    start: new Date(`${range.from}T00:00:00.000Z`),
-    end: new Date(`${range.to}T23:59:59.999Z`),
+    start: start ?? new Date(`${range.from}T00:00:00.000Z`),
+    end: nextDayStart
+      ? new Date(nextDayStart.getTime() - 1)
+      : new Date(`${range.to}T23:59:59.999Z`),
   };
 }

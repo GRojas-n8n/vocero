@@ -126,6 +126,21 @@ export type AgentAppointmentSummary = {
   showRate: number | null;
 };
 
+/**
+ * Desempeño del agente de IA en el rango: qué tan rápido responde y cuántas
+ * conversaciones tuvo que soltarle a un humano. Igual que `AgentAppointmentSummary`,
+ * no depende de ninguna bandera — se calcula sobre `message`/`conversation`, que
+ * ya existen en toda instancia.
+ */
+export type AgentPerformanceSummary = {
+  /** Respuestas de la IA a una ráfaga de mensajes entrantes, dentro del rango. */
+  totalResponses: number;
+  /** Fracción de esas respuestas que llegó dentro del umbral SLA; null si no hubo respuestas en el rango. */
+  onTimePct: number | null;
+  /** Conversaciones reales (no `is_test`) con `handoff_at` dentro del rango. */
+  handoffs: number;
+};
+
 export type ResultsResponse = {
   summary: FunnelSummary;
   abandonment: AbandonmentRow[];
@@ -133,4 +148,5 @@ export type ResultsResponse = {
   stageFunnel: StageFunnelRow[];
   sources: SourceRow[];
   agentAppointments: AgentAppointmentSummary;
+  agentPerformance: AgentPerformanceSummary;
 };

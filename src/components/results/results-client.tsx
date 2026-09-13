@@ -3,9 +3,8 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { useEvents } from "@/components/use-events";
+import { CustomRangePicker } from "@/components/results/custom-range-picker";
 import { formatMoneyCents } from "@/lib/money";
 import { cn } from "@/lib/utils";
 import { SOURCE_LABELS } from "@/server/contact-source";
@@ -76,6 +75,12 @@ type AgentAppointmentSummary = {
   showRate: number | null;
 };
 
+type AgentPerformanceSummary = {
+  totalResponses: number;
+  onTimePct: number | null;
+  handoffs: number;
+};
+
 type ResultsResponse = {
   summary: FunnelSummary;
   abandonment: AbandonmentRow[];
@@ -83,6 +88,7 @@ type ResultsResponse = {
   stageFunnel: StageFunnelRow[];
   sources: SourceRow[];
   agentAppointments: AgentAppointmentSummary;
+  agentPerformance: AgentPerformanceSummary;
 };
 
 const PRESETS: { value: RangePreset; label: string }[] = [
@@ -107,6 +113,7 @@ export function ResultsClient() {
   const [preset, setPreset] = useState<RangePreset>("30d");
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [data, setData] = useState<ResultsResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -154,41 +161,41 @@ export function ResultsClient() {
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {PRESETS.map((p) => (
-            <Button
-              key={p.value}
-              type="button"
-              size="sm"
-              variant={preset === p.value ? "default" : "secondary"}
-              onClick={() => setPreset(p.value)}
-            >
-              {p.label}
-            </Button>
+            <div key={p.value} className={p.value === "custom" ? "relative" : undefined}>
+              <Button
+                type="button"
+                size="sm"
+                variant={preset === p.value ? "default" : "secondary"}
+                onClick={() => {
+                  if (p.value === "custom") {
+                    setPreset("custom");
+                    setPickerOpen(true);
+                    return;
+                  }
+                  setPreset(p.value);
+                }}
+              >
+                {p.label}
+                {p.value === "custom" && preset === "custom" && customFrom && customTo
+                  ? ` · ${customFrom} → ${customTo}`
+                  : ""}
+              </Button>
+              {p.value === "custom" && (
+                <CustomRangePicker
+                  open={pickerOpen}
+                  from={customFrom}
+                  to={customTo}
+                  onApply={(from, to) => {
+                    setCustomFrom(from);
+                    setCustomTo(to);
+                  }}
+                  onClose={() => setPickerOpen(false)}
+                />
+              )}
+            </div>
           ))}
         </div>
       </div>
-
-      {preset === "custom" && (
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="results-from">Desde</Label>
-            <Input
-              id="results-from"
-              type="date"
-              value={customFrom}
-              onChange={(e) => setCustomFrom(e.target.value)}
-            />
-          </div>
-          <div className="flex flex-col gap-1">
-            <Label htmlFor="results-to">Hasta</Label>
-            <Input
-              id="results-to"
-              type="date"
-              value={customTo}
-              onChange={(e) => setCustomTo(e.target.value)}
-            />
-          </div>
-        </div>
-      )}
 
       {error && <p className="text-sm text-danger-text">{error}</p>}
 
@@ -330,44 +337,76 @@ export function ResultsClient() {
               </CardContent>
             </Card>
 
-            {data.agentAppointments.enabled && (
-              <Card>
-                <CardHeader>
-                  <CardTitle>Citas agendadas por el agente</CardTitle>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-4">
-                  {data.agentAppointments.totalBooked === 0 ? (
-                    <EmptyHint text="No hubo citas agendadas en este rango." />
-                  ) : (
-                    <div className="grid grid-cols-2 gap-3">
-                      <MiniStat
-                        label="Agendadas por IA"
-                        value={String(data.agentAppointments.aiBooked)}
-                        hint={
-                          data.agentAppointments.aiSharePct === null
-                            ? undefined
-                            : `${data.agentAppointments.aiSharePct}% del total`
-                        }
-                      />
-                      <MiniStat label="Agendadas a mano" value={String(data.agentAppointments.manualBooked)} />
-                      <MiniStat
-                        label="Tasa de asistencia"
-                        value={
-                          data.agentAppointments.showRate === null
-                            ? "—"
-                            : `${Math.round(data.agentAppointments.showRate * 100)}%`
-                        }
-                      />
-                      <MiniStat
-                        label="No-shows / canceladas"
-                        value={`${data.agentAppointments.noShow} / ${data.agentAppointments.cancelled}`}
-                      />
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            )}
+            <Card>
+              <CardHeader>
+                <CardTitle>Desempeño del agente de IA</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                {data.agentPerformance.totalResponses === 0 && data.agentPerformance.handoffs === 0 ? (
+                  <EmptyHint text="No hubo actividad del agente en este rango." />
+                ) : (
+                  <div className="grid grid-cols-2 gap-3">
+                    <MiniStat
+                      label="Respuestas a tiempo"
+                      value={
+                        data.agentPerformance.onTimePct === null
+                          ? "—"
+                          : `${data.agentPerformance.onTimePct}%`
+                      }
+                      hint={
+                        data.agentPerformance.totalResponses > 0
+                          ? `de ${data.agentPerformance.totalResponses} respuestas`
+                          : "sin respuestas en el rango"
+                      }
+                    />
+                    <MiniStat
+                      label="Escaladas a un humano"
+                      value={String(data.agentPerformance.handoffs)}
+                      hint="conversaciones con handoff"
+                    />
+                  </div>
+                )}
+              </CardContent>
+            </Card>
           </div>
+
+          {data.agentAppointments.enabled && (
+            <Card>
+              <CardHeader>
+                <CardTitle>Citas agendadas por el agente</CardTitle>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-4">
+                {data.agentAppointments.totalBooked === 0 ? (
+                  <EmptyHint text="No hubo citas agendadas en este rango." />
+                ) : (
+                  <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                    <MiniStat
+                      label="Agendadas por IA"
+                      value={String(data.agentAppointments.aiBooked)}
+                      hint={
+                        data.agentAppointments.aiSharePct === null
+                          ? undefined
+                          : `${data.agentAppointments.aiSharePct}% del total`
+                      }
+                    />
+                    <MiniStat label="Agendadas a mano" value={String(data.agentAppointments.manualBooked)} />
+                    <MiniStat
+                      label="Tasa de asistencia"
+                      value={
+                        data.agentAppointments.showRate === null
+                          ? "—"
+                          : `${Math.round(data.agentAppointments.showRate * 100)}%`
+                      }
+                    />
+                    <MiniStat
+                      label="No-shows / canceladas"
+                      value={`${data.agentAppointments.noShow} / ${data.agentAppointments.cancelled}`}
+                    />
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          )}
         </>
       )}
     </div>
