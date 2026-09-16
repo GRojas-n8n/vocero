@@ -90,3 +90,8 @@ const boot = Math.random().toString(36).slice(2, 8);
 export function nextOutboundWamid(): string {
   return `wamid.mock.out.${boot}.${nextN()}`;
 }
+
+/** Mismo sello que `nextOutboundWamid`, para los inbound auto-generados. */
+export function nextInboundWamid(): string {
+  return `wamid.mock.in.${boot}.${nextN()}`;
+}

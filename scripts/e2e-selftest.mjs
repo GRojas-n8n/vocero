@@ -60,6 +60,12 @@ function bot(path, opts = {}) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const PN = "PN-E2E-1";
+// wa_message_id es UNIQUE y la ingesta dedupea en silencio (correcto para
+// reintentos reales de Meta): en una RE-CORRIDA contra la MISMA base, un
+// literal fijo choca con la fila que ya dejó la corrida anterior y el ingest
+// se sale antes de tocar lastInboundAt — la ventana de 24h aparece cerrada
+// aunque el inbound "acabe de llegar". Un sello por corrida evita el choque.
+const RUN = String(Date.now()).slice(-6);
 
 async function main() {
   if (!BOT_KEY || BOT_KEY.length < 16) {
@@ -101,21 +107,26 @@ async function main() {
   await api("/api/dev/wa-mock/outbox", { method: "DELETE" });
 
   console.log("\n== us-bsuid: inbound sin wa_id ==");
+  // BSUID y nombre únicos por corrida: si no, esta sección recicla la
+  // conversación de una corrida anterior y el conteo de mensajes de la
+  // sección de idempotencia queda inflado por historial viejo.
+  const BSUID = `bsu_e2e_${RUN}`;
+  const NOMBRE_BSUID = `Dueña Dental ${RUN}`;
   const inb1 = await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
       phoneNumberId: PN,
-      fromUserId: "bsu_e2e_1",
-      name: "Dueña Dental",
+      fromUserId: BSUID,
+      name: NOMBRE_BSUID,
       text: "hola, vi su anuncio",
-      waMessageId: "wamid.e2e.bsuid.1",
+      waMessageId: `wamid.e2e.bsuid.${RUN}.1`,
     }),
   });
   ok("inbound BSUID entregado", inb1.res.ok, JSON.stringify(inb1.json));
   await sleep(1200);
 
   let convs = (await api("/api/conversations")).json?.conversations ?? [];
-  const bsuidConv = convs.find((c) => c.contact.name === "Dueña Dental");
+  const bsuidConv = convs.find((c) => c.contact.name === NOMBRE_BSUID);
   ok("conversación con nombre de perfil (no el BSUID crudo)", !!bsuidConv);
   ok("contacto BSUID sin teléfono", bsuidConv?.contact.phone === null);
 
@@ -128,7 +139,7 @@ async function main() {
   const outbox = (await api("/api/dev/wa-mock/outbox")).json?.outbox ?? [];
   ok(
     "el destinatario del envío es el BSUID",
-    outbox.some((o) => o.to === "bsu_e2e_1"),
+    outbox.some((o) => o.to === BSUID),
     JSON.stringify(outbox.map((o) => o.to))
   );
 
@@ -137,10 +148,10 @@ async function main() {
     method: "POST",
     body: JSON.stringify({
       phoneNumberId: PN,
-      fromUserId: "bsu_e2e_1",
-      name: "Dueña Dental",
+      fromUserId: BSUID,
+      name: NOMBRE_BSUID,
       text: "hola, vi su anuncio",
-      waMessageId: "wamid.e2e.bsuid.1",
+      waMessageId: `wamid.e2e.bsuid.${RUN}.1`,
     }),
   });
   await sleep(800);
@@ -192,7 +203,7 @@ async function main() {
       from: AR_REPORTADO,
       name: "Lead AR",
       text: "hola desde Argentina",
-      waMessageId: "wamid.e2e.ar.1",
+      waMessageId: `wamid.e2e.ar.${RUN}.1`,
     }),
   });
   await sleep(1200);
@@ -686,7 +697,12 @@ async function main() {
   );
 
   console.log("\n== 008: paridad inbox — echoes de coexistence (US1) ==");
-  const LEAD = "5214627008001"; // canónica: 524627008001
+  // Único por corrida: esta sección cuenta mensajes por conversación entera,
+  // así que una conversación reciclada de una corrida anterior (misma
+  // identidad fija) infla el conteo con historial viejo y el check de
+  // "no duplica" falla por una razón que no tiene nada que ver con lo que
+  // se está probando.
+  const LEAD = `5214627${RUN}`; // canónica: 524627${RUN}
 
   // Un inbound primero: la conversación existe y la ventana queda abierta.
   await api("/api/dev/wa-mock/inbound", {
@@ -696,13 +712,13 @@ async function main() {
       from: LEAD,
       name: "Lead 008",
       text: "hola, quiero informes",
-      waMessageId: "wamid.e2e.008.in.1",
+      waMessageId: `wamid.e2e.008.in.${RUN}.1`,
     }),
   });
   await sleep(1200);
   const findConv008 = async () =>
     (((await api("/api/conversations")).json?.conversations) ?? []).find(
-      (c) => c.contact.phone === "524627008001"
+      (c) => c.contact.phone === `524627${RUN}`
     );
   let conv008 = await findConv008();
   ok("conversación del lead 008 creada", Boolean(conv008), "sin conversación");
@@ -715,7 +731,7 @@ async function main() {
       phoneNumberId: PN,
       to: LEAD,
       text: "te contesto yo, dame un minuto",
-      waMessageId: "wamid.e2e.008.echo.1",
+      waMessageId: `wamid.e2e.008.echo.${RUN}.1`,
     }),
   });
   ok("echo entregado al webhook", echo1.res.ok, JSON.stringify(echo1.json));
@@ -748,7 +764,7 @@ async function main() {
       phoneNumberId: PN,
       to: LEAD,
       text: "te contesto yo, dame un minuto",
-      waMessageId: "wamid.e2e.008.echo.1",
+      waMessageId: `wamid.e2e.008.echo.${RUN}.1`,
     }),
   });
   await sleep(700);
@@ -765,7 +781,7 @@ async function main() {
       phoneNumberId: PN,
       to: LEAD,
       text: "segundo mensaje manual",
-      waMessageId: "wamid.e2e.008.echo.2",
+      waMessageId: `wamid.e2e.008.echo.${RUN}.2`,
       useMessagesKey: true,
     }),
   });
@@ -783,7 +799,7 @@ async function main() {
       phoneNumberId: PN,
       to: "5214627008002",
       text: "hola, te escribo del anuncio",
-      waMessageId: "wamid.e2e.008.echo.3",
+      waMessageId: `wamid.e2e.008.echo.${RUN}.3`,
     }),
   });
   await sleep(700);
@@ -889,7 +905,7 @@ async function main() {
       type: "image",
       mediaId: "media-e2e-img-1",
       caption: "foto de mi negocio",
-      waMessageId: "wamid.e2e.008.in.img",
+      waMessageId: `wamid.e2e.008.in.${RUN}.img`,
     }),
   });
   await sleep(1600); // ingesta + descarga in-process del binario
@@ -917,7 +933,7 @@ async function main() {
       from: LEAD,
       type: "audio",
       mediaId: "media-e2e-audio-1",
-      waMessageId: "wamid.e2e.008.in.audio",
+      waMessageId: `wamid.e2e.008.in.${RUN}.audio`,
     }),
   });
   await sleep(2200); // ingesta + descarga + transcripción vía ai-mock
@@ -939,7 +955,7 @@ async function main() {
       from: LEAD,
       type: "location",
       location: { latitude: 20.5, longitude: -100.8, name: "Mi taller" },
-      waMessageId: "wamid.e2e.008.in.loc",
+      waMessageId: `wamid.e2e.008.in.${RUN}.loc`,
     }),
   });
   await sleep(900);
@@ -960,7 +976,7 @@ async function main() {
       from: LEAD,
       type: "image",
       mediaId: "broken-no-url",
-      waMessageId: "wamid.e2e.008.in.broken",
+      waMessageId: `wamid.e2e.008.in.${RUN}.broken`,
     }),
   });
   await sleep(1600);
@@ -987,7 +1003,7 @@ async function main() {
       type: "image",
       mediaId: "media-e2e-echo-img",
       caption: "así quedaría tu logo",
-      waMessageId: "wamid.e2e.008.echo.img",
+      waMessageId: `wamid.e2e.008.echo.${RUN}.img`,
     }),
   });
   await sleep(1600);
@@ -1179,7 +1195,7 @@ async function agendaChecks() {
       from: LEAD_A,
       name: "Lead agenda A",
       text: "quiero agendar",
-      waMessageId: "wamid.e2e.015.a.1",
+      waMessageId: `wamid.e2e.015.a.${RUN}.1`,
     }),
   });
   const LEAD_B = "5214627015002";
@@ -1190,7 +1206,7 @@ async function agendaChecks() {
       from: LEAD_B,
       name: "Lead agenda B",
       text: "yo también quiero",
-      waMessageId: "wamid.e2e.015.b.1",
+      waMessageId: `wamid.e2e.015.b.${RUN}.1`,
     }),
   });
   await sleep(1500);
