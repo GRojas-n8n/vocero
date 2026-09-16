@@ -212,7 +212,12 @@ export function ContactsClient() {
                     <Send className="h-4 w-4" />
                   </Button>
                   <Link href={`/inbox?contact=${c.id}`}>
-                    <Button variant="ghost" size="icon" aria-label="Abrir conversación">
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      aria-label="Abrir conversación"
+                      title="Abrir conversación"
+                    >
                       <MessageSquareText className="h-4 w-4" />
                     </Button>
                   </Link>
@@ -220,6 +225,7 @@ export function ContactsClient() {
                     variant="ghost"
                     size="icon"
                     aria-label={c.archivedAt ? "Desarchivar" : "Archivar"}
+                    title={c.archivedAt ? "Desarchivar" : "Archivar"}
                     onClick={() => void patch(c.id, { archived: !c.archivedAt })}
                   >
                     {c.archivedAt ? (

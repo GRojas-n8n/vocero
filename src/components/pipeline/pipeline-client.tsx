@@ -489,6 +489,7 @@ function LeadCard({
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             aria-label="Abrir conversación"
+            title="Abrir conversación"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <MessageSquareText className="h-4 w-4" />
@@ -501,6 +502,7 @@ function LeadCard({
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             aria-label="Ver cotizaciones de este trato"
+            title="Ver cotizaciones de este trato"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <FileText className="h-4 w-4" />
@@ -513,6 +515,7 @@ function LeadCard({
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
             aria-label="Ver el proyecto de este trato"
+            title="Ver el proyecto de este trato"
             className="rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
           >
             <FolderKanban className="h-4 w-4" />
