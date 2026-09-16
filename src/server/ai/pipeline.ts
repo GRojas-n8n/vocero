@@ -19,6 +19,7 @@ import { matchesHandoffIntent } from "@/server/ai/handoff";
 import { buildAgentSystemPrompt } from "@/server/ai/prompts";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { bookSlot, offerSlots } from "@/server/agenda/agent";
+import { getOffers } from "@/server/agenda/offers";
 
 /**
  * Turno del agente (FR-021..FR-025).
@@ -215,10 +216,15 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
     .orderBy(asc(schema.pipelineStage.position));
 
   const agenda = agendaEnabled();
+  // Sin esto el modelo solo conoce la etiqueta humana ("mié 16 sep, 09:00")
+  // que él mismo mandó al cliente, y tiene que ADIVINAR el instante UTC exacto
+  // para book_slot — findOffered exige el epoch exacto (sin tolerancia, a
+  // propósito), así que sin la lista real el agendado nunca cierra.
+  const offers = agenda ? await getOffers(organizationId, conversationId) : [];
   const messages: ChatMessage[] = [
     {
       role: "system",
-      content: buildAgentSystemPrompt({ profile, kb, stages, agenda }),
+      content: buildAgentSystemPrompt({ profile, kb, stages, agenda, offers }),
     },
     ...(await historyAsChatMessages(history)),
   ];

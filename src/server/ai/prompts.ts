@@ -31,6 +31,16 @@ export function buildAgentSystemPrompt(input: {
    * token en hablar de horarios: la agenda no existe aquí.
    */
   agenda?: boolean;
+  /**
+   * Horarios YA ofrecidos y aún vigentes en esta conversación (memoria de
+   * `offered_slot`). El texto que el cliente ve en el chat es una etiqueta
+   * humana ("mié 16 sep, 09:00") sin el instante UTC exacto — sin esta lista,
+   * el modelo tiene que ADIVINAR el `startUtc` de book_slot a partir de esa
+   * etiqueta (zona horaria, DST, "mañana" relativo a qué día...) y casi nunca
+   * acierta el epoch exacto que `findOffered` exige. Dársela tal cual para
+   * copiar es lo que hace que book_slot funcione de verdad.
+   */
+  offers?: { startUtc: string; label: string }[];
 }): string {
   const { profile } = input;
   const stageNames = input.stages.map((s) => s.name).join(" | ");
@@ -44,9 +54,19 @@ export function buildAgentSystemPrompt(input: {
     ? [
         "- NUNCA escribas tú los horarios ni los inventes: usa offer_slots y el sistema pega los reales.",
         "- book_slot solo acepta un horario que el sistema ofreció antes en ESTA conversación. Si el cliente pide otro, vuelve a ofrecer con offer_slots.",
+        "- Para el `startUtc` de book_slot, COPIA TAL CUAL uno de los valores de la lista \"Horarios vigentes para agendar\" (si existe más abajo) según cuál eligió el cliente. Nunca lo calcules ni lo derives tú mismo.",
         "- Si el cliente quiere CANCELAR una cita → handoff: esa decisión no es tuya.",
       ]
     : [];
+  const offersBlock =
+    input.agenda && input.offers && input.offers.length > 0
+      ? [
+          "Horarios vigentes para agendar (aún no expiran; usa el startUtc EXACTO de la fila que el cliente eligió):\n" +
+            input.offers
+              .map((o) => `- ${o.label} → startUtc: "${o.startUtc}"`)
+              .join("\n"),
+        ]
+      : [];
   return [
     `Eres "${profile.name}", el asistente de WhatsApp de este negocio. Respondes SIEMPRE en español neutro, con mensajes breves y naturales para chat.`,
     profile.tone ? `Tono: ${profile.tone}` : null,
@@ -57,6 +77,7 @@ export function buildAgentSystemPrompt(input: {
     profile.greeting ? `Saludo sugerido para conversaciones nuevas: ${profile.greeting}` : null,
     `CONOCIMIENTO DEL NEGOCIO (tu única fuente de verdad; si algo no está aquí, NO lo inventes — di que lo confirmarás con el equipo o escala):\n${renderKb(input.kb)}`,
     `Etapas del pipeline disponibles: ${stageNames}`,
+    ...offersBlock,
     [
       "En cada turno respondes ÚNICAMENTE un objeto JSON con UNA acción:",
       '- {"action":"none"} — no responder nada.',
