@@ -1,3 +1,4 @@
+import { appBaseUrl } from "@/lib/env";
 import { computeAvailability } from "@/server/agenda/availability";
 import { getSettings } from "@/server/agenda/settings";
 import { spreadByDay } from "@/server/agenda/spread";
@@ -87,17 +88,25 @@ export async function bookSlot(input: {
 
     const base =
       input.confirmation?.trim() || `¡Listo! Te agendé para ${result.label}.`;
+    // El .ics se genera al vuelo desde la cita real: si el enlace de reunión
+    // llega después (linkPending), igual queda dentro cuando el prospecto
+    // abra este link — no se re-envía nada.
+    const calendarUrl = `${appBaseUrl()}/api/agenda/bookings/${result.booking.id}/ics`;
+    const guardar = `Guárdala en tu calendario: ${calendarUrl}`;
     if (result.meetingLink) {
-      return { ok: true, text: `${base}\nEnlace: ${result.meetingLink}` };
+      return {
+        ok: true,
+        text: `${base}\nEnlace: ${result.meetingLink}\n${guardar}`,
+      };
     }
     if (result.linkPending) {
       // La cita existe; el enlace no. No se promete lo que no se tiene.
       return {
         ok: true,
-        text: `${base}\nEn un momento te comparto el enlace por aquí.`,
+        text: `${base}\nEn un momento te comparto el enlace por aquí.\n${guardar}`,
       };
     }
-    return { ok: true, text: base };
+    return { ok: true, text: `${base}\n${guardar}` };
   } catch (err) {
     if (!(err instanceof BookingError)) throw err;
 

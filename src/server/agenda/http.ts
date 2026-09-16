@@ -1,3 +1,4 @@
+import { appBaseUrl } from "@/lib/env";
 import { BookingError, type BookingResult } from "@/server/agenda/service";
 
 /**
@@ -22,6 +23,8 @@ export type BookingPayload = {
   meetingLink: string | null;
   linkPending: boolean;
   label: string;
+  /** .ics descargable para que el prospecto guarde la cita en su calendario. */
+  calendarUrl: string;
 };
 
 export function bookingPayload(result: BookingResult): BookingPayload {
@@ -35,6 +38,7 @@ export function bookingPayload(result: BookingResult): BookingPayload {
      */
     linkPending: result.linkPending,
     label: result.label,
+    calendarUrl: `${appBaseUrl()}/api/agenda/bookings/${result.booking.id}/ics`,
   };
 }
 

@@ -1129,6 +1129,12 @@ async function agendaChecks() {
     );
     const page = await fetch(`${BASE}/bookings`, { headers: { cookie } });
     ok("la pantalla /bookings no existe", page.status === 404, `status=${page.status}`);
+    const icsApagado = await fetch(`${BASE}/api/agenda/bookings/x/ics`);
+    ok(
+      "/api/agenda/bookings/:id/ics → 404 con la agenda apagada",
+      icsApagado.status === 404,
+      `status=${icsApagado.status}`
+    );
     console.log("  (agenda apagada: el resto de los checks de 015 no aplican)");
     return;
   }
@@ -1265,6 +1271,25 @@ async function agendaChecks() {
     JSON.stringify(creada.json)
   );
   ok("el enlace no queda pendiente con el conector soberano", creada.json?.linkPending === false);
+
+  // El prospecto no vive en el CRM: el .ics público es lo que le deja guardar
+  // la cita en SU calendario sin que se le olvide asistir.
+  ok(
+    "la respuesta trae la URL pública del .ics para guardar la cita",
+    typeof creada.json?.calendarUrl === "string" &&
+      creada.json.calendarUrl.includes(`/api/agenda/bookings/${creada.json.bookingId}/ics`),
+    JSON.stringify(creada.json?.calendarUrl)
+  );
+  const icsRes = await fetch(creada.json.calendarUrl);
+  const icsBody = await icsRes.text();
+  ok(
+    "el .ics público responde 200 con un VEVENT válido de esa cita",
+    icsRes.status === 200 &&
+      (icsRes.headers.get("content-type") ?? "").includes("text/calendar") &&
+      icsBody.includes("BEGIN:VEVENT") &&
+      icsBody.includes(`UID:${creada.json.bookingId}@vocero`),
+    `status=${icsRes.status} ct=${icsRes.headers.get("content-type")}`
+  );
 
   const dispTrasReserva = (await api("/api/calendar/availability")).json?.slots ?? [];
   ok(

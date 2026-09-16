@@ -20,6 +20,8 @@ Con `AGENDA` ausente:
 2. `GET /api/bot/availability` responde **404** — antes incluso de mirar la
    llave: el endpoint no existe aquí.
 3. La pantalla `/bookings` responde 404 y la navegación no la menciona.
+4. `GET /api/agenda/bookings/:id/ics` responde **404** — el .ics público
+   tampoco existe en una instancia sin agenda.
 
 Con `AGENDA=on`, las mismas rutas responden con normalidad.
 
@@ -39,8 +41,12 @@ Con `AGENDA=on`, las mismas rutas responden con normalidad.
    nunca ofrecido a esa conversación, se rechaza con `409 slot_not_offered` y
    la respuesta trae lo que sí se ofreció.
 2. **Camino feliz**: reservar un hueco ofrecido responde **201 Created** (no
-   200), con etiqueta y enlace; el hueco desaparece de la disponibilidad y la
-   cita aparece en Citas marcada como agendada por la IA.
+   200), con etiqueta, enlace y la URL pública de su `.ics`; el hueco
+   desaparece de la disponibilidad y la cita aparece en Citas marcada como
+   agendada por la IA. El mensaje que recibe el prospecto incluye esa URL para
+   que guarde la cita en su propio calendario. El `.ics` es público (sin
+   sesión: el prospecto nunca entra al CRM) y su "credencial" es el propio id
+   de la cita, impredecible como un token.
 3. **La carrera**: un segundo intento sobre el mismo instante responde `409`
    con el sobre **anidado** y `slots` como **hermano**; en la base queda **una
    sola cita activa** en ese instante.

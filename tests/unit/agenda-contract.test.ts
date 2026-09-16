@@ -30,7 +30,15 @@ describe("cuerpo de una reserva creada", () => {
       meetingLink: "https://meet.ejemplo.com/sala",
       linkPending: false,
       label: "mié 5 ago, 09:00",
+      calendarUrl: expect.stringContaining("/api/agenda/bookings/bk_123/ics"),
     });
+  });
+
+  it("trae la URL pública del .ics para que el prospecto guarde la cita en su calendario", () => {
+    const payload = bookingPayload(result);
+    expect(payload.calendarUrl).toMatch(
+      /^https?:\/\/.+\/api\/agenda\/bookings\/bk_123\/ics$/
+    );
   });
 
   it("`linkPending` viaja SIEMPRE: es lo que decide si se promete el enlace", () => {

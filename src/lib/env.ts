@@ -127,6 +127,16 @@ function stripEmpty(env: NodeJS.ProcessEnv): Record<string, string> {
   return out;
 }
 
+/**
+ * `APP_BASE_URL` cruda, sin pasar por `getEnv()`: construir un enlace no
+ * puede exigir que TODO el entorno valide (mismo motivo que `agendaEnabled()`
+ * en `server/agenda/flag.ts`) — un test o un llamador que solo arma un
+ * `BookingPayload` no tiene por qué traer `DATABASE_URL` ni el resto.
+ */
+export function appBaseUrl(): string {
+  return process.env.APP_BASE_URL || "http://localhost:3000";
+}
+
 /** true si el entorno de pruebas interno (mocks) está habilitado y NO es producción. */
 export function isMockEnabled(): boolean {
   return (
