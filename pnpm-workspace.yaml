@@ -2,3 +2,16 @@ allowBuilds:
   esbuild: true
   sharp: true
   unrs-resolver: true
+
+# Triaje de Dependabot 2026-09-17 (ver memory/feedback-dependabot-triage.md):
+# fija transitivos vulnerables de herramientas de build/dev-time a su primera
+# versión parchada. Ninguno se ejecuta en el runtime del standalone de
+# producción (postcss/nanoid/js-yaml/browserslist son build-time; sharp
+# queda fuera a propósito: next/image no se usa en este repo, así que
+# forzarlo no reduce riesgo real y sí puede complicar el binario nativo).
+overrides:
+  nanoid@<3.3.18: "^3.3.18"
+  js-yaml@<4.3.2: "^4.3.2"
+  browserslist@<4.28.7: "^4.28.7"
+  baseline-browser-mapping@<2.11.0: "^2.11.0"
+  postcss@<8.5.23: "^8.5.23"

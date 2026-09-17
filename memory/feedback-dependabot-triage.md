@@ -41,6 +41,27 @@ Ninguna de estas tiene un parche que se pueda tomar sola sin forzar
 probarlo) o sin el bump mayor de `vitest`. Revisar de nuevo cuando
 Dependabot abra un PR de `vitest` 4.x, o al planear esa migración aparte.
 
+**Actualización 2026-09-17**: mismas 19 alertas (ningún número nuevo), pero
+ya existían parches que el 2026-09-13 no había — se aplicaron:
+- `esbuild` (dependencia DIRECTA, no transitiva: alerta #3) → bump normal
+  0.24.2→0.25.0 en `package.json`. Verificado bundleando `scripts/seed/*.ts`
+  con los mismos flags del script real.
+- `nanoid`, `js-yaml`, `browserslist`+`baseline-browser-mapping`, `postcss`
+  → `overrides` en `pnpm-workspace.yaml` (⚠️ NO en `package.json`: pnpm
+  10+/11 movió `pnpm.overrides` ahí — con pnpm 11.5.0 pinneado en
+  `packageManager`, ponerlo en `package.json` se ignora en silencio con un
+  WARN, sin fallar). Cada override usa el selector `pkg@<versión>` +
+  reemplazo con caret (`^4.3.2`, no `>=4.3.2`) para quedarse en la MISMA
+  línea mayor — un `>=` sin techo saltó `js-yaml` a la 5.x transitiva de
+  `@eslint/eslintrc` sin querer en el primer intento.
+- `sharp` queda IGUAL a propósito (dormido, `next/image` no se usa).
+- `vite`/`vitest` 3→4 siguen diferidos (bump mayor, pase aparte).
+
+Verificado con `pnpm typecheck/lint/test` (496/496) y `pnpm build` completo
+(el CSS de producción salió con tamaño normal, sin errores del pipeline de
+postcss/tailwind pese a forzar la copia que trae embebida `next@15.5.25`).
+Cierra 6 de las 19 alertas (4 altas, 2 medias) sin cambiar código de la app.
+
 **Por qué**: el severity de GitHub es sobre la librería en abstracto, no
 sobre si ESTE código la usa de forma explotable. Leer la descripción del
 advisory (`gh api repos/OWNER/REPO/dependabot/alerts/N`) y grepear el patrón
