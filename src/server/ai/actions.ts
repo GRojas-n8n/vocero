@@ -44,6 +44,14 @@ const agendaActions = [
     action: z.literal("book_slot"),
     startUtc: z.string().min(1),
     reply: z.string().optional(),
+    /**
+     * Fase 5 (auditoría 2026-09) — resumen breve de POR QUÉ agenda, tomado de
+     * lo que el cliente realmente dijo (nunca inventado): "cotizar taladros",
+     * "seguimiento de propuesta". Se guarda en `booking.notes` y se muestra en
+     * Citas como "Motivo". Opcional: sin esto, Citas simplemente no muestra
+     * motivo para esa cita — nunca se rellena con un texto genérico.
+     */
+    reason: z.string().trim().min(1).max(200).optional(),
   }),
 ] as const;
 

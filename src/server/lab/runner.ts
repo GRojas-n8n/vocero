@@ -22,13 +22,35 @@ const RUN_TIMEOUT_MS = 10 * 60 * 1000;
 
 export class RunConflictError extends Error {}
 
-export async function startRun(organizationId: string): Promise<string> {
+/**
+ * Fase 6 — comportamiento a probar SIN haberlo guardado todavía (desde la
+ * vista previa de Ajustes → Agente). `undefined` en un campo significa "usa
+ * el valor vigente en `agent_profile`" (igual que hoy); `null` explícito
+ * significa "vacío" — mismo contrato que el PATCH del perfil.
+ */
+export type ProfileOverride = {
+  name?: string;
+  tone?: string | null;
+  instructions?: string | null;
+  escalationRules?: string | null;
+  greeting?: string | null;
+};
+
+export async function startRun(
+  organizationId: string,
+  profileOverride?: ProfileOverride
+): Promise<string> {
   const db = getDb();
   let runId: string;
   try {
     const inserted = await db
       .insert(schema.agentTestRun)
-      .values({ id: newId("testRun"), organizationId, status: "running" })
+      .values({
+        id: newId("testRun"),
+        organizationId,
+        status: "running",
+        isDraftPreview: Boolean(profileOverride),
+      })
       .returning();
     runId = inserted[0]!.id;
   } catch (err) {
@@ -50,7 +72,7 @@ export async function startRun(organizationId: string): Promise<string> {
   );
 
   // Fire-and-forget in-process: el POST regresa ya; el progreso va por SSE.
-  void executeRun(runId, organizationId).catch(async (err) => {
+  void executeRun(runId, organizationId, profileOverride).catch(async (err) => {
     console.error("[lab] corrida falló:", err);
     await failRun(runId, organizationId, String(err));
   });
@@ -60,7 +82,8 @@ export async function startRun(organizationId: string): Promise<string> {
 
 async function executeRun(
   runId: string,
-  organizationId: string
+  organizationId: string,
+  profileOverride?: ProfileOverride
 ): Promise<void> {
   const timeout = new Promise<never>((_, reject) =>
     setTimeout(
@@ -69,7 +92,10 @@ async function executeRun(
     )
   );
   try {
-    await Promise.race([runAllCases(runId, organizationId), timeout]);
+    await Promise.race([
+      runAllCases(runId, organizationId, profileOverride),
+      timeout,
+    ]);
   } catch (err) {
     await failRun(runId, organizationId, String(err));
   }
@@ -77,7 +103,8 @@ async function executeRun(
 
 async function runAllCases(
   runId: string,
-  organizationId: string
+  organizationId: string,
+  profileOverride?: ProfileOverride
 ): Promise<void> {
   const db = getDb();
   const cases = await db
@@ -97,7 +124,13 @@ async function runAllCases(
     .from(schema.agentProfile)
     .where(eq(schema.agentProfile.organizationId, organizationId))
     .limit(1);
-  const profile = profileRows[0];
+  // El override reemplaza lo vigente para AMBOS lados de la prueba: el
+  // agente simulado (runAgentTurn) y el texto contra el que el juez mide —
+  // si no, el juez calificaría un comportamiento distinto al que de verdad
+  // conversó.
+  const profile = profileRows[0]
+    ? { ...profileRows[0], ...profileOverride }
+    : undefined;
   const behaviorText = profile
     ? [
         `Nombre: ${profile.name}`,
@@ -124,7 +157,8 @@ async function runAllCases(
 
     const { transcript, conversationId } = await runConversation(
       organizationId,
-      persona
+      persona,
+      profileOverride
     );
 
     const outcome = await judgeCase({
@@ -169,7 +203,8 @@ async function runAllCases(
 /** Conversa el guion completo contra el agente real; corta al primer handoff. */
 async function runConversation(
   organizationId: string,
-  persona: Persona
+  persona: Persona,
+  profileOverride?: ProfileOverride
 ): Promise<{
   transcript: { role: "cliente" | "agente"; text: string }[];
   conversationId: string;
@@ -206,7 +241,7 @@ async function runConversation(
       .where(eq(schema.conversation.id, convId));
 
     // Turno REAL del agente, secuencial y sin debounce (FR-030).
-    await runAgentTurn(convId);
+    await runAgentTurn(convId, { profileOverride });
 
     const convRows = await db
       .select({ handoffAt: schema.conversation.handoffAt })

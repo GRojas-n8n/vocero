@@ -18,6 +18,8 @@ export function serializeContact(
     archivedAt: c.archivedAt?.toISOString() ?? null,
     source: effectiveSource(c.source),
     priority,
+    /** Fase 4: marca manual de dato de prueba/sistema (nunca automática). */
+    sampleType: c.sampleType,
     // Viaja siempre, aunque esté vacía: la pantalla necesita distinguir "aún
     // no la han llenado" de "este contacto no la trae".
     ficha: (c.ficha as FichaDto | null) ?? {},

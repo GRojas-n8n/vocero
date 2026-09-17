@@ -29,6 +29,9 @@ type Run = {
   startedAt: string;
   finishedAt: string | null;
   delta: number | null;
+  /** Fase 6 — probó un cambio sin publicar (vista previa de Ajustes → Agente),
+   *  no el comportamiento vigente. */
+  isDraftPreview: boolean;
 };
 
 type Hallazgo = {
@@ -239,7 +242,14 @@ function HistoryList({
           }`}
         >
           <div className="flex items-center justify-between">
-            <ScoreBadge run={run} />
+            <span className="flex items-center gap-1.5">
+              <ScoreBadge run={run} />
+              {run.isDraftPreview && (
+                <Badge variant="secondary" title="Corrió sobre un cambio sin publicar">
+                  Vista previa
+                </Badge>
+              )}
+            </span>
             {run.delta !== null && run.delta !== 0 && (
               <span
                 className={`flex items-center gap-0.5 text-xs font-medium ${

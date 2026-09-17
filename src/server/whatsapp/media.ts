@@ -181,14 +181,43 @@ export async function downloadGraphMedia(
 }
 
 /**
+ * Marca en `fetchError` un fallo DEFINITIVO (Meta ya no tiene el archivo:
+ * 404/410, o excede el límite de tamaño). Sin columna nueva: el texto
+ * legible sigue siendo el mismo para el operador, solo se le antepone un
+ * prefijo que `ensureAssetAvailable` reconoce para NO reintentar.
+ */
+const GONE_PREFIX = "[definitivo] ";
+
+function encodeFetchError(message: string, gone: boolean): string {
+  return gone ? `${GONE_PREFIX}${message}` : message;
+}
+
+/** Texto legible sin el prefijo interno, para mostrar al operador. */
+export function describeFetchError(error: string | null): string | null {
+  if (!error) return null;
+  return error.startsWith(GONE_PREFIX) ? error.slice(GONE_PREFIX.length) : error;
+}
+
+function isGoneFetchError(error: string | null): boolean {
+  return error?.startsWith(GONE_PREFIX) ?? false;
+}
+
+/**
  * Garantiza que el asset esté en disco (`fetchStatus=available`).
  * Se usa en la descarga in-process post-ingesta Y on-demand desde la ruta de
  * media. Nunca lanza hacia el webhook: el que llama decide qué hacer con el
  * resultado. Devuelve el asset actualizado o null si no se pudo.
+ *
+ * `awaitTranscription` (default false): si el asset es audio sin `caption`,
+ * por defecto la transcripción se dispara en segundo plano SIN esperarla (la
+ * ruta on-demand de media solo quiere los bytes, ya). `scheduleMediaJob` la
+ * pone en `true` para el disparo desde la ingesta, de forma que la promesa
+ * que registra cubra descarga + transcripción de punta a punta.
  */
 export async function ensureAssetAvailable(
   organizationId: string,
-  assetId: string
+  assetId: string,
+  opts?: { awaitTranscription?: boolean }
 ): Promise<typeof schema.mediaAsset.$inferSelect | null> {
   const db = getDb();
   const rows = await db
@@ -200,6 +229,13 @@ export async function ensureAssetAvailable(
   if (!asset || asset.organizationId !== organizationId) return null;
   if (asset.fetchStatus === "available") return asset;
   if (!asset.waMediaId) return null; // location/contacts no tienen binario
+  // Bug reportado: cada vez que alguien abría el hilo, la ruta de media
+  // reintentaba la descarga contra Graph aunque Meta YA hubiera confirmado
+  // que el archivo expiró (404/410) — un reintento inútil por cada vista,
+  // sin ningún camino a que algún día funcione.
+  if (asset.fetchStatus === "failed" && isGoneFetchError(asset.fetchError)) {
+    return asset;
+  }
 
   const creds = await getCredentialsByOrg(organizationId);
   if (!creds) return null;
@@ -224,21 +260,85 @@ export async function ensureAssetAvailable(
       .returning();
     const result = updated[0] ?? null;
     if (result && result.kind === "audio" && !result.caption) {
-      // En segundo plano: nunca bloquea la descarga ni el ingest (FR-013).
-      transcribeAndCaption(assetId, data, result.mimeType ?? "audio/ogg").catch(
-        (err) => console.warn(`[media] transcripción del asset ${assetId} falló:`, err)
+      const transcription = transcribeAndCaption(
+        assetId,
+        data,
+        result.mimeType ?? "audio/ogg"
       );
+      if (opts?.awaitTranscription) {
+        await transcription;
+      } else {
+        // Nunca bloquea la descarga ni el ingest (FR-013).
+        void transcription;
+      }
     }
     return result;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const gone = err instanceof MediaFetchError && err.gone;
     await db
       .update(schema.mediaAsset)
-      .set({ fetchStatus: "failed", fetchError: message, updatedAt: new Date() })
+      .set({
+        fetchStatus: "failed",
+        fetchError: encodeFetchError(message, gone),
+        updatedAt: new Date(),
+      })
       .where(eq(schema.mediaAsset.id, assetId));
-    console.warn(`[media] descarga del asset ${assetId} falló: ${message}`);
+    console.warn(
+      `[media] descarga del asset ${assetId} falló${gone ? " (definitivo, no se reintentará)" : ""}: ${message}`
+    );
     return null;
   }
+}
+
+/**
+ * En memoria, por proceso: job de descarga+transcripción en curso por asset.
+ * El turno del agente (pipeline.ts) espera esta MISMA promesa vía
+ * `awaitMediaJob` en vez de adivinar con polling o de responder antes de que
+ * termine (bug 2026-09-16: el turno corría a los 6-8 s del coalesce, mucho
+ * antes de que la descarga+transcripción real terminaran, y respondía con el
+ * marcador "sin transcripción" incluso cuando el audio era perfectamente
+ * entendible).
+ */
+const globalForMediaJobs = globalThis as unknown as {
+  __mediaJobs?: Map<string, Promise<void>>;
+};
+function mediaJobs(): Map<string, Promise<void>> {
+  if (!globalForMediaJobs.__mediaJobs) globalForMediaJobs.__mediaJobs = new Map();
+  return globalForMediaJobs.__mediaJobs;
+}
+
+/** Dispara descarga+transcripción de un asset sin bloquear al llamador, y
+ * registra la promesa combinada para que `awaitMediaJob` la pueda esperar. */
+export function scheduleMediaJob(organizationId: string, assetId: string): void {
+  const job = ensureAssetAvailable(organizationId, assetId, {
+    awaitTranscription: true,
+  })
+    .then(() => undefined)
+    .catch(() => undefined);
+  mediaJobs().set(assetId, job);
+  void job.finally(() => {
+    if (mediaJobs().get(assetId) === job) mediaJobs().delete(assetId);
+  });
+}
+
+/**
+ * Espera el job de descarga+transcripción de un asset, acotado a `timeoutMs`.
+ * Sin job en curso en ESTE proceso (ya terminó, o nunca se disparó desde
+ * aquí — p. ej. tras un reinicio) resuelve de inmediato: el llamador decide
+ * qué hacer según el estado que lea después en BD.
+ */
+export async function awaitMediaJob(
+  assetId: string,
+  timeoutMs: number
+): Promise<void> {
+  const job = mediaJobs().get(assetId);
+  if (!job) return;
+  await Promise.race([job, sleep(timeoutMs)]);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -246,7 +346,9 @@ export async function ensureAssetAvailable(
  * pone caption en audio, así que el campo está libre): el agente
  * (historyAsChatMessages) y la bandeja la muestran como si fuera texto del
  * mensaje, sin tabla nueva. Un hipo del proveedor deja el asset sin
- * transcripción — nunca sin audio ni rompe nada más.
+ * transcripción — nunca sin audio ni rompe nada más — pero ahora SIEMPRE
+ * queda un motivo legible en `transcribeError` y en logs (antes se perdía en
+ * silencio: `if (!result.ok) return;` sin registrar nada).
  */
 async function transcribeAndCaption(
   assetId: string,
@@ -254,23 +356,52 @@ async function transcribeAndCaption(
   mimeType: string
 ): Promise<void> {
   const result = await transcribeAudio({ data, mimeType });
-  if (!result.ok) return;
   const db = getDb();
+
+  async function findMessage() {
+    const msgRows = await db
+      .select({
+        id: schema.message.id,
+        organizationId: schema.message.organizationId,
+        conversationId: schema.message.conversationId,
+      })
+      .from(schema.message)
+      .where(eq(schema.message.mediaAssetId, assetId))
+      .limit(1);
+    return msgRows[0] ?? null;
+  }
+
+  if (!result.ok) {
+    console.warn(
+      `[media] transcripción del asset ${assetId} sin resultado: ${result.error}`
+    );
+    await db
+      .update(schema.mediaAsset)
+      .set({ transcribeError: result.error, updatedAt: new Date() })
+      .where(eq(schema.mediaAsset.id, assetId));
+    // Bug reportado: un fallo de transcripción no avisaba a nadie en vivo —
+    // solo quedaba en logs del servidor. El operador con el hilo abierto se
+    // quedaba sin saber por qué Max "no entendió" el audio hasta refrescar.
+    const msg = await findMessage();
+    if (msg) {
+      publish(msg.organizationId, {
+        type: "message.media",
+        data: {
+          conversationId: msg.conversationId,
+          messageId: msg.id,
+          caption: null,
+          transcribeError: result.error,
+        },
+      });
+    }
+    return;
+  }
   await db
     .update(schema.mediaAsset)
-    .set({ caption: result.text, updatedAt: new Date() })
+    .set({ caption: result.text, transcribeError: null, updatedAt: new Date() })
     .where(eq(schema.mediaAsset.id, assetId));
 
-  const msgRows = await db
-    .select({
-      id: schema.message.id,
-      organizationId: schema.message.organizationId,
-      conversationId: schema.message.conversationId,
-    })
-    .from(schema.message)
-    .where(eq(schema.message.mediaAssetId, assetId))
-    .limit(1);
-  const msg = msgRows[0];
+  const msg = await findMessage();
   if (!msg) return;
   publish(msg.organizationId, {
     type: "message.media",
@@ -278,6 +409,7 @@ async function transcribeAndCaption(
       conversationId: msg.conversationId,
       messageId: msg.id,
       caption: result.text,
+      transcribeError: null,
     },
   });
 }

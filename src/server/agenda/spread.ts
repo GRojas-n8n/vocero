@@ -60,3 +60,44 @@ export function spreadByDay(
 export function daysWithAgenda(slots: SpreadSlot[]): string[] {
   return [...new Set(slots.map((s) => s.dayIso))];
 }
+
+/**
+ * De un catálogo ya repartido por día, toma `count` dando prioridad a la
+ * VARIEDAD de días: el primer hueco de cada día, luego el segundo de cada
+ * día, y así — nunca los primeros `count` a secas.
+ *
+ * Existe porque `spreadByDay` reparte por día pero conserva el orden
+ * cronológico: si el primer día tiene `perDay` huecos o más, un simple
+ * `.slice(0, count)` con `count === perDay` se los come TODOS a ese único día
+ * y el cliente nunca ve que también hay agenda otros días — el bug real que
+ * reportó un negocio en producción ("dijo que había jueves, viernes y lunes,
+ * pero solo mostró miércoles").
+ */
+export function pickAcrossDays(
+  spread: SpreadSlot[],
+  count: number
+): SpreadSlot[] {
+  if (count <= 0) return [];
+
+  const byDay = new Map<string, SpreadSlot[]>();
+  for (const slot of spread) {
+    const bucket = byDay.get(slot.dayIso);
+    if (bucket) bucket.push(slot);
+    else byDay.set(slot.dayIso, [slot]);
+  }
+  const days = [...byDay.keys()];
+
+  const out: SpreadSlot[] = [];
+  for (let round = 0; out.length < count; round++) {
+    let addedThisRound = false;
+    for (const day of days) {
+      const slot = byDay.get(day)![round];
+      if (slot === undefined) continue;
+      out.push(slot);
+      addedThisRound = true;
+      if (out.length >= count) break;
+    }
+    if (!addedThisRound) break; // se agotó el catálogo entero
+  }
+  return out;
+}

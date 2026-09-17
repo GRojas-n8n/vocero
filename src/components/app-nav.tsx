@@ -124,18 +124,32 @@ export function AppNav({
   const pathname = usePathname();
   const router = useRouter();
   const [unread, setUnread] = useState(0);
+  // Distinto de "no leídas": conversaciones donde el prospecto sigue sin
+  // respuesta (ver server/inbox/pending.ts). Se muestra como punto de alerta
+  // en "Bandeja" aunque el operador ya haya visto el hilo.
+  const [pending, setPending] = useState(0);
 
   async function refetchUnread() {
     const res = await fetch("/api/conversations").catch(() => null);
     if (!res?.ok) return;
     const data = (await res.json()) as {
-      conversations: { unreadCount: number }[];
+      conversations: { unreadCount: number; pendingReply: boolean }[];
     };
     setUnread(data.conversations.reduce((a, c) => a + c.unreadCount, 0));
+    setPending(data.conversations.filter((c) => c.pendingReply).length);
   }
 
   useEffect(() => {
     void refetchUnread();
+  }, []);
+
+  // El bug reportado (mensaje sin respuesta con "No leídas: 0") puede tardar
+  // en generar un evento SSE nuevo: el turno del agente ya falló y nadie más
+  // va a escribir. Este refresco periódico es la única forma de que la
+  // alerta de "pendientes" aparezca sin depender de tráfico nuevo.
+  useEffect(() => {
+    const id = setInterval(() => void refetchUnread(), 60_000);
+    return () => clearInterval(id);
   }, []);
 
   useEvents({
@@ -197,6 +211,12 @@ export function AppNav({
                 strokeWidth={1.8}
               />
               <span className="flex-1">{item.label}</span>
+              {item.badge && pending > 0 && (
+                <span
+                  className="h-[8px] w-[8px] shrink-0 rounded-full bg-danger"
+                  title={`${pending} conversación${pending === 1 ? "" : "es"} sin respuesta`}
+                />
+              )}
               {item.badge && unread > 0 && (
                 <span className="flex h-[18px] min-w-[18px] items-center justify-center rounded-full bg-brand px-1.5 text-[10.5px] font-bold text-brand-fg">
                   {unread}

@@ -154,6 +154,18 @@ export const contact = pgTable(
     source: text("source", {
       enum: ["anuncio", "organico", "referido", "conocido", "otro"],
     }),
+    /**
+     * Fase 4 (auditoría 2026-09) — marca EXPLÍCITA y manual de que este
+     * contacto no es un prospecto real: `demo` (datos de demostración, p. ej.
+     * `seedDemo`/"Ferretería El Martillo") o `system` (ping de prueba de
+     * Meta, número propio del negocio, etc. — p. ej. el contacto
+     * "WhatsApp Business" que crea el botón "Enviar mensaje" del panel de
+     * developers.facebook.com). NULL en TODA fila existente y en todo
+     * contacto nuevo real: nadie lo pone salvo que el operador lo marque a
+     * mano desde la ficha del contacto — nunca se infiere ni se reclasifica
+     * solo. `seedDemo` sí lo fija en sus propias filas nuevas.
+     */
+    sampleType: text("sample_type", { enum: ["demo", "system"] }),
     archivedAt: timestamp("archived_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -456,6 +468,16 @@ export const mediaAsset = pgTable(
       .notNull()
       .default("pending"),
     fetchError: text("fetch_error"),
+    /**
+     * 018 (fix 2026-09-16) — Motivo de un intento de transcripción de audio
+     * que terminó sin `caption` (proveedor sin soporte de audio, sin voz
+     * entendible, error del proveedor…). Antes esto se perdía en silencio: el
+     * turno del agente no tenía forma de distinguir "todavía transcribiendo"
+     * de "ya falló", así que respondía con el marcador genérico antes de
+     * tiempo. NULL mientras no se haya intentado o si `caption` ya tiene el
+     * resultado.
+     */
+    transcribeError: text("transcribe_error"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -595,6 +617,41 @@ export const agentProfile = pgTable(
 );
 
 /**
+ * Fase 6 (auditoría 2026-09) — historial de comportamiento del agente:
+ * publicar instrucciones defectuosas directamente (sin vista previa, sin
+ * poder volver atrás) era el riesgo reportado. Cada PATCH real a
+ * `agent_profile` (los campos de "Comportamiento", NUNCA el toggle
+ * `enabled`) guarda AQUÍ el estado que estaba a punto de reemplazarse —
+ * nunca el estado nuevo, que ya vive en `agent_profile` — así que esta tabla
+ * es, en efecto, una pila de deshacer: revertir copia una fila de vuelta a
+ * `agent_profile` y ANTES de hacerlo guarda el estado actual aquí también,
+ * de forma que revertir nunca pierde lo que había.
+ */
+export const agentProfileVersion = pgTable(
+  "agent_profile_version",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    tone: text("tone"),
+    instructions: text("instructions"),
+    escalationRules: text("escalation_rules"),
+    greeting: text("greeting"),
+    /** Quién causó que ESTE estado dejara de ser el vigente. NULL = se perdió
+     *  la sesión (usuario borrado) o vino de un seed/migración. */
+    changedByUserId: text("changed_by_user_id").references(() => user.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("agent_profile_version_org_idx").on(t.organizationId, t.createdAt),
+  ]
+);
+
+/**
  * 022 — Credenciales del proveedor LLM (OpenRouter-compatible) por
  * organización: token + modelo, cifrados igual que WhatsApp/Zoom/Google. Sin
  * fila, el runtime cae a las variables de entorno (`OPENROUTER_*`) — así una
@@ -682,6 +739,15 @@ export const agentTestRun = pgTable(
       .default("running"),
     score: integer("score"),
     error: text("error"),
+    /**
+     * Fase 6 — true cuando la corrida probó un CAMBIO SIN GUARDAR
+     * (`POST /api/lab/runs` con `profileOverride`, desde la vista previa de
+     * Ajustes → Agente), no el comportamiento vigente. El historial del
+     * Laboratorio necesita distinguirlo: un score bajo aquí es sobre
+     * instrucciones que todavía no publicaste, no sobre las que sí están
+     * en producción.
+     */
+    isDraftPreview: boolean("is_draft_preview").notNull().default(false),
     startedAt: timestamp("started_at").notNull().defaultNow(),
     finishedAt: timestamp("finished_at"),
   },

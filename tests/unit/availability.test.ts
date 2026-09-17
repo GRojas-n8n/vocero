@@ -8,7 +8,7 @@ import {
   normalizeWeeklyHours,
   type CalendarSettings,
 } from "@/server/agenda/settings";
-import { daysWithAgenda, spreadByDay } from "@/server/agenda/spread";
+import { daysWithAgenda, pickAcrossDays, spreadByDay } from "@/server/agenda/spread";
 
 /** 015 — El motor: horario − ocupado, con aviso mínimo. Sin BD ni reloj real. */
 
@@ -207,6 +207,60 @@ describe("spreadByDay", () => {
     expect(
       spreadByDay([], { timezone: MX, limit: 12, perDay: 3, now })
     ).toEqual([]);
+  });
+});
+
+/**
+ * Bug reportado en producción: el negocio tenía agenda miércoles, jueves,
+ * viernes y lunes, pero el mensaje que Max le mandó al prospecto solo traía
+ * horarios del miércoles. Causa: `offerSlots` tomaba `spread.slice(0, SHOWN)`
+ * — como `spread` viene agrupado por día y el miércoles por sí solo ya tenía
+ * `perDay` huecos, esos primeros SHOWN eran siempre del mismo día aunque el
+ * catálogo completo (y lo que se le decía al modelo) cubriera varios más.
+ */
+describe("pickAcrossDays", () => {
+  const now = new Date("2026-08-05T14:00:00.000Z");
+  // Mié 5 a vie 7 de agosto, 09:00-18:00 ⇒ 18 huecos por día, como arriba.
+  const libres = filterFreeSlots(
+    buildCandidateSlots(settings(), "2026-08-05", "2026-08-07"),
+    [],
+    { now, minNoticeHours: 0, timezone: MX }
+  );
+  // El catálogo tal cual lo registra `offerSlots`: hasta 3 por día.
+  const catalogo = spreadByDay(libres, {
+    timezone: MX,
+    limit: 12,
+    perDay: 3,
+    now,
+  });
+
+  it("reparte por VARIEDAD de días en vez de agotar el primero", () => {
+    // El miércoles solo tiene 3 huecos en el catálogo (perDay=3), así que el
+    // bug real se reproduce exacto: pedir 3 con `.slice` daría solo miércoles.
+    const shown = pickAcrossDays(catalogo, 3);
+    expect(shown).toHaveLength(3);
+    expect(new Set(shown.map((s) => s.dayIso)).size).toBeGreaterThan(1);
+    expect(daysWithAgenda(shown)).toEqual([
+      "2026-08-05",
+      "2026-08-06",
+      "2026-08-07",
+    ]);
+  });
+
+  it("con un solo día disponible, sigue devolviendo `count` huecos de ese día", () => {
+    const unDia = catalogo.filter((s) => s.dayIso === "2026-08-05");
+    const shown = pickAcrossDays(unDia, 3);
+    expect(shown).toHaveLength(3);
+    expect(daysWithAgenda(shown)).toEqual(["2026-08-05"]);
+  });
+
+  it("nunca inventa más de lo que hay", () => {
+    expect(pickAcrossDays(catalogo.slice(0, 2), 5)).toHaveLength(2);
+    expect(pickAcrossDays([], 5)).toEqual([]);
+  });
+
+  it("count <= 0 no devuelve nada", () => {
+    expect(pickAcrossDays(catalogo, 0)).toEqual([]);
   });
 });
 

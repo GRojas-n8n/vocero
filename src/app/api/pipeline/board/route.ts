@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { withAuth } from "@/lib/api";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
@@ -31,7 +31,16 @@ export const GET = withAuth(async (session) => {
         eq(schema.conversation.isTest, false)
       )
     )
-    .where(scoped(schema.lead.organizationId, session.organizationId))
+    .where(
+      scoped(
+        schema.lead.organizationId,
+        session.organizationId,
+        // Fase 4: un contacto marcado a mano como demo/sistema (ver
+        // schema.ts `contact.sampleType`) no es un trato real — se
+        // administra/desmarca desde Contactos, no aquí.
+        isNull(schema.contact.sampleType)
+      )
+    )
     .orderBy(asc(schema.lead.position));
 
   // La moneda del negocio viaja con el tablero: el cliente suma sus columnas y

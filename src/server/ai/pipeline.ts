@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { scoped } from "@/lib/db/tenant";
@@ -20,6 +20,7 @@ import { buildAgentSystemPrompt } from "@/server/ai/prompts";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { bookSlot, offerSlots } from "@/server/agenda/agent";
 import { getOffers } from "@/server/agenda/offers";
+import { awaitMediaJob } from "@/server/whatsapp/media";
 
 /**
  * Turno del agente (FR-021..FR-025).
@@ -116,6 +117,68 @@ function mediaPlaceholder(
 }
 
 /**
+ * Cuánto espera el turno, como máximo, a que termine la transcripción de una
+ * nota de voz que llegó como último mensaje entrante ANTES de resignarse al
+ * marcador "sin transcripción disponible". El coalesce (AGENT_COALESCE_MS,
+ * 6-8 s) ya pasó cuando esto corre; descarga+transcripción reales casi
+ * siempre tardan más que eso, así que sin esta espera el turno respondía
+ * sistemáticamente antes de tiempo (bug 2026-09-16, Diego/MÁS Impulso: Max
+ * decía "no pude escucharla" con audios perfectamente entendibles).
+ */
+const AUDIO_TRANSCRIBE_WAIT_MS = 20_000;
+
+/** true si el asset de audio todavía no tiene un desenlace definitivo
+ * (ni transcripción, ni fallo de transcripción, ni fallo de descarga). */
+function audioStillPending(
+  asset: typeof schema.mediaAsset.$inferSelect | undefined
+): boolean {
+  if (!asset) return false;
+  if (asset.kind !== "audio") return false;
+  if (asset.caption) return false;
+  if (asset.transcribeError) return false;
+  if (asset.fetchStatus === "failed") return false;
+  return true;
+}
+
+/**
+ * Si el último mensaje entrante es una nota de voz sin desenlace todavía,
+ * espera (acotado) el job de descarga+transcripción registrado por la
+ * ingesta (`scheduleMediaJob`) en vez de dejar que el turno responda de
+ * inmediato con el marcador genérico. No lanza ni bloquea otras
+ * conversaciones — solo retrasa ESTE turno, que ya tiene el lock del
+ * coalesce.
+ */
+async function waitForAudioTranscription(
+  conversationId: string,
+  mediaAssetId: string
+): Promise<void> {
+  const db = getDb();
+  const fetchAsset = async () => {
+    const rows = await db
+      .select()
+      .from(schema.mediaAsset)
+      .where(eq(schema.mediaAsset.id, mediaAssetId))
+      .limit(1);
+    return rows[0];
+  };
+
+  const before = await fetchAsset();
+  if (!audioStillPending(before)) return;
+
+  console.log(
+    `[agente] esperando transcripción del audio ${mediaAssetId} antes de responder (conv ${conversationId})`
+  );
+  await awaitMediaJob(mediaAssetId, AUDIO_TRANSCRIBE_WAIT_MS);
+
+  const after = await fetchAsset();
+  if (audioStillPending(after)) {
+    console.warn(
+      `[agente] transcripción del audio ${mediaAssetId} no terminó en ${AUDIO_TRANSCRIBE_WAIT_MS}ms: respondo con el marcador genérico`
+    );
+  }
+}
+
+/**
  * Arma el historial para el LLM. Un mensaje sin `text` (adjunto) YA NO
  * desaparece del turno: entra con un marcador (o la transcripción, si 018 la
  * dejó en `media.caption`) para que el agente sepa que algo llegó en vez de
@@ -157,7 +220,23 @@ async function historyAsChatMessages(
  * Ejecuta UN turno del agente ahora (el Laboratorio lo llama directo, con
  * debounce 0 y sin pasar por el coalesce).
  */
-export async function runAgentTurn(conversationId: string): Promise<void> {
+export async function runAgentTurn(
+  conversationId: string,
+  opts?: {
+    /**
+     * Fase 6 — comportamiento SIN GUARDAR a probar (vista previa de Ajustes
+     * → Agente, vía el Laboratorio). Nunca se aplica a una conversación
+     * real: si `conversation.isTest` es false, se ignora — un turno real
+     * jamás corre con instrucciones que el operador no publicó.
+     */
+    profileOverride?: Partial<
+      Pick<
+        typeof schema.agentProfile.$inferSelect,
+        "name" | "tone" | "instructions" | "escalationRules" | "greeting"
+      >
+    >;
+  }
+): Promise<void> {
   const db = getDb();
   const convRows = await db
     .select()
@@ -176,8 +255,11 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
     .from(schema.agentProfile)
     .where(eq(schema.agentProfile.organizationId, organizationId))
     .limit(1);
-  const profile = profileRows[0];
+  let profile = profileRows[0];
   if (!profile) return;
+  if (conversation.isTest && opts?.profileOverride) {
+    profile = { ...profile, ...opts.profileOverride };
+  }
   // El toggle global aplica a conversaciones reales; el Laboratorio evalúa el
   // comportamiento configurado aunque el agente aún no esté encendido.
   if (!conversation.isTest && !profile.enabled) return;
@@ -202,6 +284,10 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
   if (lastInbound.text && matchesHandoffIntent(lastInbound.text)) {
     await applyHandoff(conversationId, organizationId, "cliente");
     return;
+  }
+
+  if (lastInbound.type === "audio" && lastInbound.mediaAssetId) {
+    await waitForAudioTranscription(conversationId, lastInbound.mediaAssetId);
   }
 
   const kb = await db
@@ -260,6 +346,7 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
                 conversationId,
                 startUtc: action.startUtc,
                 confirmation: action.reply,
+                reason: action.reason,
               });
         await deliverReply(conversation, turn.text);
         if (turn.ok) {
@@ -305,10 +392,23 @@ export async function runAgentTurn(conversationId: string): Promise<void> {
       return;
     }
     case "handoff": {
-      if (action.farewell) {
-        await deliverReply(conversation, action.farewell);
-      }
+      // El traspaso se PERSISTE antes de intentar la despedida (bug
+      // reportado: si el envío fallaba después de que Meta ya había
+      // aceptado el mensaje, la excepción se comía el applyHandoff de abajo
+      // y el prospecto se quedaba "avisado" sin que el panel de Resultados ni
+      // el estado de la conversación registraran el traspaso). Con el orden
+      // invertido, el peor caso pasa a ser "se aplicó el traspaso pero la
+      // despedida no salió" — nunca al revés.
       await applyHandoff(conversationId, organizationId, "modelo");
+      if (action.farewell) {
+        try {
+          await deliverReply(conversation, action.farewell);
+        } catch (err) {
+          console.error(
+            `[agente] traspaso aplicado pero la despedida no se pudo enviar: ${err}`
+          );
+        }
+      }
       return;
     }
   }
@@ -370,10 +470,19 @@ export async function applyHandoff(
   reason: "cliente" | "modelo" | "error" | "ventana"
 ): Promise<void> {
   const db = getDb();
+  // Idempotente a propósito (WHERE handoff_at IS NULL): un segundo intento de
+  // traspaso sobre la MISMA conversación (p. ej. la despedida del handoff de
+  // arriba falla por ventana cerrada y `deliverReply` dispara su propio
+  // applyHandoff("ventana")) no debe pisar el motivo real ya registrado.
   const updated = await db
     .update(schema.conversation)
     .set({ handoffAt: new Date(), handoffReason: reason, updatedAt: new Date() })
-    .where(eq(schema.conversation.id, conversationId))
+    .where(
+      and(
+        eq(schema.conversation.id, conversationId),
+        isNull(schema.conversation.handoffAt)
+      )
+    )
     .returning();
   if (!updated[0]) return;
   publish(organizationId, {

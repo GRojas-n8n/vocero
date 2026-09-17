@@ -191,6 +191,9 @@ export async function seedDemo(
       waIdentity: demo.phone,
       name: demo.name,
       notes: demo.notes ?? null,
+      // Fase 4: se marca desde el alta — nunca queda mezclado con prospectos
+      // reales en Resultados/Pipeline/Bandeja sin que nadie lo reclasifique.
+      sampleType: "demo",
     });
 
     const lastInbound = demo.thread

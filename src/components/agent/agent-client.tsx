@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Sparkles, Trash2 } from "lucide-react";
+import Link from "next/link";
+import { FlaskConical, History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +19,28 @@ type Profile = {
   greeting: string | null;
 };
 
+/** Los únicos campos que entran a la vista previa / historial (Fase 6):
+ *  `enabled` es un interruptor instantáneo, no una "versión" de instrucciones. */
+type BehaviorField = "name" | "tone" | "instructions" | "escalationRules" | "greeting";
+const BEHAVIOR_FIELDS: { key: BehaviorField; label: string }[] = [
+  { key: "name", label: "Nombre" },
+  { key: "tone", label: "Tono" },
+  { key: "instructions", label: "Instrucciones" },
+  { key: "escalationRules", label: "Reglas de escalado" },
+  { key: "greeting", label: "Saludo" },
+];
+
+type ProfileVersion = {
+  id: string;
+  name: string;
+  tone: string | null;
+  instructions: string | null;
+  escalationRules: string | null;
+  greeting: string | null;
+  changedByName: string | null;
+  createdAt: string;
+};
+
 type KbEntry = {
   id: string;
   kind: "qa" | "block";
@@ -26,7 +49,7 @@ type KbEntry = {
   content: string | null;
 };
 
-export function AgentClient() {
+export function AgentClient({ labEnabled }: { labEnabled: boolean }) {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [aiConfigured, setAiConfigured] = useState(true);
   const [entries, setEntries] = useState<KbEntry[]>([]);
@@ -112,7 +135,10 @@ export function AgentClient() {
       )}
 
       <div className="grid gap-4 p-4 sm:gap-6 sm:p-6 lg:grid-cols-2">
-        <ProfileSection profile={profile} onSave={saveProfile} />
+        <div className="space-y-4 sm:space-y-6">
+          <ProfileSection profile={profile} labEnabled={labEnabled} onSave={saveProfile} />
+          <HistorySection onRestored={() => void refetch()} />
+        </div>
         <KbSection entries={entries} kbSize={kbSize} onChanged={() => void refetch()} />
       </div>
     </div>
@@ -121,13 +147,18 @@ export function AgentClient() {
 
 function ProfileSection({
   profile,
+  labEnabled,
   onSave,
 }: {
   profile: Profile;
+  labEnabled: boolean;
   onSave: (patch: Partial<Profile>) => Promise<void>;
 }) {
   const [form, setForm] = useState(profile);
+  const [previewing, setPreviewing] = useState(false);
   useEffect(() => setForm(profile), [profile]);
+
+  const changed = BEHAVIOR_FIELDS.some(({ key }) => form[key] !== profile[key]);
 
   return (
     <Card>
@@ -184,7 +215,297 @@ function ProfileSection({
             onChange={(e) => setForm({ ...form, greeting: e.target.value })}
           />
         </div>
-        <Button onClick={() => void onSave(form)}>Guardar comportamiento</Button>
+        <Button onClick={() => setPreviewing(true)} disabled={!changed}>
+          Revisar y publicar
+        </Button>
+        {!changed && (
+          <p className="text-xs text-muted-foreground">
+            Nada por publicar: el formulario coincide con lo vigente.
+          </p>
+        )}
+      </CardContent>
+
+      {previewing && (
+        <PublishPreviewDialog
+          original={profile}
+          draft={form}
+          labEnabled={labEnabled}
+          onClose={() => setPreviewing(false)}
+          onConfirm={async () => {
+            await onSave(form);
+            setPreviewing(false);
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+/**
+ * Fase 6 — vista previa OBLIGATORIA antes de publicar: antes, "Guardar" era
+ * directo a producción, sin ver el cambio ni poder probarlo. Aquí se ve
+ * exactamente qué campo cambia, con opción de probarlo en el Laboratorio
+ * ANTES de que le llegue a un cliente real.
+ */
+function PublishPreviewDialog({
+  original,
+  draft,
+  labEnabled,
+  onClose,
+  onConfirm,
+}: {
+  original: Profile;
+  draft: Profile;
+  labEnabled: boolean;
+  onClose: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const [publishing, setPublishing] = useState(false);
+  const [testState, setTestState] = useState<
+    | { status: "idle" }
+    | { status: "starting" }
+    | { status: "running"; runId: string }
+    | { status: "error"; message: string }
+  >({ status: "idle" });
+
+  const diffs = BEHAVIOR_FIELDS.filter(({ key }) => original[key] !== draft[key]);
+
+  async function testInLab() {
+    setTestState({ status: "starting" });
+    const overridePatch: Record<string, string | null> = {};
+    for (const { key } of diffs) overridePatch[key] = draft[key];
+    const res = await fetch("/api/lab/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ profileOverride: overridePatch }),
+    }).catch(() => null);
+    if (!res?.ok) {
+      const data = (await res?.json().catch(() => null)) as {
+        error?: { message?: string };
+      } | null;
+      setTestState({
+        status: "error",
+        message: data?.error?.message ?? "No se pudo iniciar la prueba",
+      });
+      return;
+    }
+    const data = (await res.json()) as { runId: string };
+    setTestState({ status: "running", runId: data.runId });
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-overlay p-4"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Revisar cambios antes de publicar"
+    >
+      <div className="max-h-[85dvh] w-full max-w-lg overflow-y-auto rounded-lg border bg-card p-5 shadow-xl">
+        <h3 className="mb-1 font-semibold">Revisar antes de publicar</h3>
+        <p className="mb-4 text-xs text-muted-foreground">
+          Esto es lo que va a cambiar. Se aplica al agente en cuanto confirmes
+          — ningún cliente ve esto hasta que pulses &quot;Publicar&quot;.
+        </p>
+
+        {diffs.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Sin cambios.</p>
+        ) : (
+          <ul className="space-y-3">
+            {diffs.map(({ key, label }) => (
+              <li key={key} className="rounded-md border p-3 text-sm">
+                <p className="mb-1 font-medium">{label}</p>
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-medium text-destructive">Antes: </span>
+                  {original[key]?.trim() || "(vacío)"}
+                </p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  <span className="font-medium text-primary">Después: </span>
+                  {draft[key]?.trim() || "(vacío)"}
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {labEnabled && (
+          <div className="mt-4 rounded-md border border-brand-soft bg-brand-tint p-3">
+            <p className="mb-2 flex items-center gap-1.5 text-sm font-medium">
+              <FlaskConical className="h-4 w-4" /> Probar antes de publicar
+            </p>
+            {testState.status === "idle" && (
+              <Button size="sm" variant="secondary" onClick={() => void testInLab()}>
+                Correr el Laboratorio con este cambio
+              </Button>
+            )}
+            {testState.status === "starting" && (
+              <p className="text-xs text-muted-foreground">Iniciando…</p>
+            )}
+            {testState.status === "running" && (
+              <p className="text-xs text-muted-foreground">
+                Corriendo — revisa el resultado en{" "}
+                <Link href="/lab" className="text-brand-text underline">
+                  el Laboratorio
+                </Link>{" "}
+                (marcado como &quot;vista previa&quot;, no cuenta contra el
+                historial de producción). Puedes publicar antes de que
+                termine si ya confías en el cambio.
+              </p>
+            )}
+            {testState.status === "error" && (
+              <p className="text-xs text-destructive">{testState.message}</p>
+            )}
+          </div>
+        )}
+
+        <div className="mt-5 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onClose} disabled={publishing}>
+            Cancelar
+          </Button>
+          <Button
+            disabled={publishing || diffs.length === 0}
+            onClick={async () => {
+              setPublishing(true);
+              await onConfirm();
+              setPublishing(false);
+            }}
+          >
+            {publishing ? "Publicando…" : "Publicar cambios"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Fase 6 — historial de comportamiento (pila de deshacer): antes no había
+ * forma de ver qué cambió ni de volver atrás si una instrucción resultaba
+ * defectuosa. Revertir es en sí una publicación más: queda registrada.
+ */
+function HistorySection({ onRestored }: { onRestored: () => void }) {
+  const [versions, setVersions] = useState<ProfileVersion[] | null>(null);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState<string | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState<string | null>(null);
+
+  const refetch = useCallback(async () => {
+    const res = await fetch("/api/agent/profile/versions").catch(() => null);
+    if (!res?.ok) return;
+    const data = (await res.json()) as { versions: ProfileVersion[] };
+    setVersions(data.versions);
+  }, []);
+
+  useEffect(() => {
+    void refetch();
+  }, [refetch]);
+
+  async function restore(id: string) {
+    setRestoring(id);
+    setConfirmRestore(null);
+    const res = await fetch(`/api/agent/profile/versions/${id}/restore`, {
+      method: "POST",
+    }).catch(() => null);
+    setRestoring(null);
+    if (res?.ok) {
+      onRestored();
+      void refetch();
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1.5 text-base">
+          <History className="h-4 w-4" /> Historial de comportamiento
+        </CardTitle>
+        <CardDescription>
+          Cada vez que publicas un cambio, lo que estaba antes queda aquí.
+          Revertir no borra nada: el estado actual también se guarda.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {versions === null && (
+          <p className="text-sm text-muted-foreground">Cargando…</p>
+        )}
+        {versions?.length === 0 && (
+          <p className="text-sm text-muted-foreground">
+            Todavía no has publicado ningún cambio.
+          </p>
+        )}
+        {versions && versions.length > 0 && (
+          <ul className="space-y-2">
+            {versions.map((v) => (
+              <li key={v.id} className="rounded-md border p-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    Vigente hasta el{" "}
+                    {new Date(v.createdAt).toLocaleString("es-MX", {
+                      dateStyle: "medium",
+                      timeStyle: "short",
+                    })}
+                    {v.changedByName ? ` · cambiado por ${v.changedByName}` : ""}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() =>
+                        setExpanded((e) => (e === v.id ? null : v.id))
+                      }
+                    >
+                      {expanded === v.id ? "Ocultar" : "Ver detalle"}
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={restoring === v.id}
+                      onClick={() => setConfirmRestore(v.id)}
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" /> Revertir
+                    </Button>
+                  </div>
+                </div>
+
+                {expanded === v.id && (
+                  <dl className="mt-2 space-y-1 border-t pt-2 text-xs">
+                    {BEHAVIOR_FIELDS.map(({ key, label }) => (
+                      <div key={key}>
+                        <dt className="font-medium text-muted-foreground">
+                          {label}
+                        </dt>
+                        <dd className="whitespace-pre-wrap">
+                          {v[key]?.trim() || "(vacío)"}
+                        </dd>
+                      </div>
+                    ))}
+                  </dl>
+                )}
+
+                {confirmRestore === v.id && (
+                  <div className="mt-2 flex items-center gap-2 rounded-sm bg-subtle p-2">
+                    <span className="text-xs">
+                      ¿Publicar este estado como el comportamiento vigente?
+                    </span>
+                    <Button
+                      size="sm"
+                      disabled={restoring === v.id}
+                      onClick={() => void restore(v.id)}
+                    >
+                      Sí, revertir
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => setConfirmRestore(null)}
+                    >
+                      Cancelar
+                    </Button>
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
       </CardContent>
     </Card>
   );

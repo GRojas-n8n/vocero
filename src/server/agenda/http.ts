@@ -25,6 +25,13 @@ export type BookingPayload = {
   label: string;
   /** .ics descargable para que el prospecto guarde la cita en su calendario. */
   calendarUrl: string;
+  /**
+   * Página pública con los datos reales de la cita y botones para
+   * precargarla en Google Calendar / Outlook, además del .ics — pensada para
+   * mandarse por WhatsApp en vez del .ics a secas. Campo ADITIVO: un cerebro
+   * externo que ya integró `calendarUrl` sigue funcionando igual.
+   */
+  confirmationUrl: string;
 };
 
 export function bookingPayload(result: BookingResult): BookingPayload {
@@ -39,6 +46,7 @@ export function bookingPayload(result: BookingResult): BookingPayload {
     linkPending: result.linkPending,
     label: result.label,
     calendarUrl: `${appBaseUrl()}/api/agenda/bookings/${result.booking.id}/ics`,
+    confirmationUrl: `${appBaseUrl()}/cita/${result.booking.id}`,
   };
 }
 

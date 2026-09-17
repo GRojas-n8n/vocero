@@ -4,7 +4,7 @@ import { newId } from "@/lib/db/ids";
 import { normalizeMx } from "@/lib/meta/client";
 import { publish } from "@/server/events/bus";
 import { getCredentialsByPhoneNumberId } from "@/server/whatsapp/credentials";
-import { ensureAssetAvailable } from "@/server/whatsapp/media";
+import { describeFetchError, scheduleMediaJob } from "@/server/whatsapp/media";
 import type { Channel } from "@/lib/channels";
 import type {
   WebhookMediaPayload,
@@ -135,8 +135,9 @@ async function attachMediaAsset(
       .set({ mediaAssetId: asset.id })
       .where(eq(schema.message.id, messageId));
     if (asset.fetchStatus === "pending") {
-      // Descarga in-process, sin bloquear la ingesta; on-demand reintenta.
-      void ensureAssetAvailable(organizationId, asset.id).catch(() => {});
+      // Descarga (+ transcripción si es audio) in-process, sin bloquear la
+      // ingesta; el turno del agente espera este MISMO job (pipeline.ts).
+      scheduleMediaJob(organizationId, asset.id);
     }
     return asset;
   } catch (err) {
@@ -498,6 +499,8 @@ export function serializeMessage(
           fileSize: media.fileSize,
           caption: media.caption,
           fetchStatus: media.fetchStatus,
+          fetchError: describeFetchError(media.fetchError),
+          transcribeError: media.transcribeError,
           payload: media.payload,
         }
       : null,

@@ -47,7 +47,7 @@ export function buildAgentSystemPrompt(input: {
   const agendaLines = input.agenda
     ? [
         '- {"action":"offer_slots","reply":"..."} — ofrecer horarios para agendar (reply es solo la frase de entrada; los horarios los pone el sistema).',
-        '- {"action":"book_slot","startUtc":"<uno de los horarios que el sistema ofreció, en ISO UTC>","reply":"..."} — agendar el horario que el cliente eligió.',
+        '- {"action":"book_slot","startUtc":"<uno de los horarios que el sistema ofreció, en ISO UTC>","reply":"...","reason":"..."} — agendar el horario que el cliente eligió. `reason` es opcional: un resumen de 3-6 palabras de POR QUÉ agenda, tomado literalmente de lo que dijo el cliente en la conversación (ej. "cotizar taladros inalámbricos"). Nunca lo inventes: si no quedó claro, omite el campo.',
       ]
     : [];
   const agendaRules = input.agenda

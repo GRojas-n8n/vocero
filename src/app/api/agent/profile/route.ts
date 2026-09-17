@@ -3,6 +3,7 @@ import { apiError, parseBody, withAuth } from "@/lib/api";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
 import { isAiConfigured } from "@/lib/env";
+import { snapshotIfChanged } from "@/server/agent/profile-history";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,23 @@ export const PUT = withAuth(async (session, req: Request) => {
   if (!body.ok) return body.response;
 
   const db = getDb();
+  const rows = await db
+    .select()
+    .from(schema.agentProfile)
+    .where(scoped(schema.agentProfile.organizationId, session.organizationId))
+    .limit(1);
+  const current = rows[0];
+  if (!current) return apiError(404, "not_found", "Perfil no encontrado");
+
+  // Antes de pisar el comportamiento vigente, lo guarda en el historial
+  // (Fase 6): "Guardar" ya no es un callejón sin salida.
+  await snapshotIfChanged(
+    session.organizationId,
+    current,
+    body.data,
+    session.userId
+  );
+
   const updated = await db
     .update(schema.agentProfile)
     .set({ ...body.data, updatedAt: new Date() })

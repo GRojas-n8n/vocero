@@ -108,11 +108,14 @@ function MediaBlock({ media }: { media: MessageMediaDto }) {
 
   if (media.fetchStatus !== "available") {
     return (
-      <span className="inline-flex items-center gap-1.5 text-text-3">
+      <span
+        className="inline-flex items-center gap-1.5 text-text-3"
+        title={media.fetchStatus === "failed" ? media.fetchError ?? undefined : undefined}
+      >
         <Paperclip className="h-3.5 w-3.5" strokeWidth={1.7} />
         {mediaLabel(media.kind)}
         {media.fetchStatus === "failed"
-          ? " — contenido no disponible"
+          ? ` — ${media.fetchError ?? "contenido no disponible"}`
           : " — descargando…"}
       </span>
     );
@@ -242,6 +245,28 @@ export function MessageThread({ messages }: { messages: MessageDto[] }) {
                         {m.media.caption}
                       </span>
                     )}
+                    {/* Distinto del fallo de ENTREGA (abajo, solo salientes):
+                        esto es un audio que SÍ llegó pero no se pudo entender —
+                        el motivo real de un "Max no entendió la nota de voz". */}
+                    {m.media.kind === "audio" &&
+                      !m.media.caption &&
+                      m.media.transcribeError && (
+                        <span
+                          className="mt-1.5 flex items-start gap-1.5 rounded-md border border-warning-soft bg-warning-tint px-2 py-1.5 text-[11.5px] leading-snug text-warning-text"
+                          title="Fallo al transcribir, no al entregar"
+                        >
+                          <AlertTriangle
+                            className="mt-[1px] h-3.5 w-3.5 shrink-0"
+                            strokeWidth={1.8}
+                          />
+                          <span>
+                            <span className="font-semibold">
+                              No se pudo transcribir.
+                            </span>{" "}
+                            {m.media.transcribeError}
+                          </span>
+                        </span>
+                      )}
                   </span>
                 ) : m.type === "text" || m.type === "template" ? (
                   <span className="whitespace-pre-wrap break-words">

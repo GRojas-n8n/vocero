@@ -38,17 +38,26 @@ export function buildEventIcs(input: {
   description?: string;
   location?: string;
   organizerName?: string;
+  /**
+   * "CANCELLED" ⇒ METHOD:CANCEL además de STATUS:CANCELLED. Es lo que deja a
+   * un cliente de calendario (Apple, Outlook de escritorio) que soporta
+   * cancelaciones por UID quitar el evento si el prospecto vuelve a abrir el
+   * mismo enlace después de que la cita se cancele — sin esto, el .ics de una
+   * cita cancelada se veía idéntico a uno confirmado.
+   */
+  status?: "CONFIRMED" | "CANCELLED";
 }): string {
   const start = new Date(input.startUtc);
   const end = new Date(start.getTime() + input.durationMinutes * 60_000);
   const now = new Date();
+  const status = input.status ?? "CONFIRMED";
 
   const lines = [
     "BEGIN:VCALENDAR",
     "VERSION:2.0",
     "PRODID:-//Vocero CRM//Agenda//ES",
     "CALSCALE:GREGORIAN",
-    "METHOD:PUBLISH",
+    `METHOD:${status === "CANCELLED" ? "CANCEL" : "PUBLISH"}`,
     "BEGIN:VEVENT",
     `UID:${input.uid}`,
     `DTSTAMP:${formatUtc(now)}`,
@@ -67,7 +76,7 @@ export function buildEventIcs(input: {
       `ORGANIZER;CN=${escapeText(input.organizerName)}:MAILTO:noreply@noreply.invalid`
     );
   }
-  lines.push("STATUS:CONFIRMED", "END:VEVENT", "END:VCALENDAR");
+  lines.push(`STATUS:${status}`, "END:VEVENT", "END:VCALENDAR");
 
   return lines.map(foldLine).join("\r\n") + "\r\n";
 }

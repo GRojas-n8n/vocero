@@ -22,6 +22,8 @@ Con `AGENDA` ausente:
 3. La pantalla `/bookings` responde 404 y la navegación no la menciona.
 4. `GET /api/agenda/bookings/:id/ics` responde **404** — el .ics público
    tampoco existe en una instancia sin agenda.
+5. `GET /cita/:id` (la página de confirmación) responde **404** — igual que el
+   `.ics`, ni siquiera para una cita que sí existe.
 
 Con `AGENDA=on`, las mismas rutas responden con normalidad.
 
@@ -41,18 +43,39 @@ Con `AGENDA=on`, las mismas rutas responden con normalidad.
    nunca ofrecido a esa conversación, se rechaza con `409 slot_not_offered` y
    la respuesta trae lo que sí se ofreció.
 2. **Camino feliz**: reservar un hueco ofrecido responde **201 Created** (no
-   200), con etiqueta, enlace y la URL pública de su `.ics`; el hueco
-   desaparece de la disponibilidad y la cita aparece en Citas marcada como
-   agendada por la IA. El mensaje que recibe el prospecto incluye esa URL para
-   que guarde la cita en su propio calendario. El `.ics` es público (sin
+   200), con etiqueta, enlace, la URL pública de su `.ics` y la URL de su
+   **página de confirmación** (`confirmationUrl`, aditivo: no reemplaza
+   `calendarUrl`); el hueco desaparece de la disponibilidad y la cita aparece
+   en Citas marcada como agendada por la IA. El mensaje que recibe el
+   prospecto incluye la página de confirmación para que guarde la cita en su
+   propio calendario. Tanto el `.ics` como la página son públicos (sin
    sesión: el prospecto nunca entra al CRM) y su "credencial" es el propio id
    de la cita, impredecible como un token.
+   - La página trae fecha, hora de inicio y fin, zona horaria, descripción y
+     el enlace de reunión si existe, más botones para precargar el evento en
+     Google Calendar y Outlook — dejando claro que hay que pulsar **Guardar**
+     ahí, nada se agenda solo — y conserva la descarga `.ics` para Apple y
+     otros calendarios.
+   - Si la cita se **cancela**, tanto la página como el `.ics` se leen SIEMPRE
+     en vivo: la página dice explícito que se canceló y **deja de ofrecer**
+     los botones de Google/Outlook (serían datos viejos), y el `.ics` se
+     re-publica con `STATUS:CANCELLED`/`METHOD:CANCEL` bajo el MISMO UID, para
+     que un cliente de calendario que ya la había guardado pueda quitarla.
 3. **La carrera**: un segundo intento sobre el mismo instante responde `409`
    con el sobre **anidado** y `slots` como **hermano**; en la base queda **una
    sola cita activa** en ese instante.
 4. Las alternativas del `409` ya son la oferta vigente: reservar una de ellas
    responde 201 de inmediato.
 5. **Reprogramar** por la superficie del bot responde **200**, no 201.
+6. **El mensaje que arma el agente in-process cubre más de un día**: si el
+   negocio tiene agenda en varios días, el menú de 3 horarios que Max le
+   manda al prospecto no puede ser el mismo día repetido tres veces — bug real
+   de producción (el negocio tenía jueves, viernes y lunes; el mensaje solo
+   traía miércoles) causado por tomar los primeros N de un catálogo ya
+   agrupado por día en vez de repartir por variedad de días
+   (`pickAcrossDays`, `server/agenda/spread.ts`). Se ejercita el camino
+   conversacional real — inbound → pipeline del agente → `offer_slots` — no
+   solo el catálogo crudo de `/api/bot/availability`.
 
 ## US4 — El operador
 

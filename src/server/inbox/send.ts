@@ -2,6 +2,7 @@ import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { newId } from "@/lib/db/ids";
 import { graphRequest, MetaApiError, normalizeRecipient } from "@/lib/meta/client";
+import { describeSendError } from "@/lib/meta/send-errors";
 import { publish } from "@/server/events/bus";
 import {
   getCredentialsByOrg,
@@ -269,6 +270,21 @@ async function persistOutbound(input: {
   return message.id;
 }
 
+/**
+ * Códigos de `SendError` que YA tienen su propia UX y no deben duplicarse
+ * como una burbuja "failed" más en el hilo: `window_closed` se convierte en
+ * traspaso (pipeline.ts), `not_connected`/`reconnect_required` son un
+ * problema de la CONEXIÓN completa (banner en Ajustes, no de este mensaje
+ * puntual) y `sandbox_violation` es un guardrail que nunca debería disparar
+ * en un flujo real (FR-031).
+ */
+const SILENT_FAILURE_CODES = new Set<SendError["code"]>([
+  "sandbox_violation",
+  "not_connected",
+  "reconnect_required",
+  "window_closed",
+]);
+
 /** Envía un mensaje de texto libre por WhatsApp. */
 export async function sendText(input: {
   conversationId: string;
@@ -276,37 +292,74 @@ export async function sendText(input: {
   text: string;
   aiGenerated?: boolean;
 }): Promise<SendResult> {
-  const target = await prepareSend(input.conversationId, input.organizationId);
-  const { credentials, recipient } = target;
+  try {
+    const target = await prepareSend(input.conversationId, input.organizationId);
+    const { credentials, recipient } = target;
 
-  const waMessageId = target.instagram
-    ? await callInstagramSend(target, input.text)
-    : target.messenger
-      ? await callMessengerSend(target, input.text)
-      : await callGraphSend(credentials!, {
-          messaging_product: "whatsapp",
-          to: recipient,
-          type: "text",
-          text: { body: input.text },
-        });
+    const waMessageId = target.instagram
+      ? await callInstagramSend(target, input.text)
+      : target.messenger
+        ? await callMessengerSend(target, input.text)
+        : await callGraphSend(credentials!, {
+            messaging_product: "whatsapp",
+            to: recipient,
+            type: "text",
+            text: { body: input.text },
+          });
 
-  const messageId = await persistOutbound({
-    organizationId: input.organizationId,
-    conversationId: input.conversationId,
-    waMessageId,
-    type: "text",
-    text: input.text,
-    // Un canal sin acuses de entrega confirma al aceptar; uno con acuses
-    // avanza despues por webhook. Sin esta distincion el mensaje se queda
-    // con el reloj puesto para siempre.
-    status: capabilitiesFor(target.conversation.channel).deliveryReceipts
-      ? "pending"
-      : "sent",
-    aiGenerated: input.aiGenerated,
-    origin: input.aiGenerated ? "ai" : "operator",
-  });
+    const messageId = await persistOutbound({
+      organizationId: input.organizationId,
+      conversationId: input.conversationId,
+      waMessageId,
+      type: "text",
+      text: input.text,
+      // Un canal sin acuses de entrega confirma al aceptar; uno con acuses
+      // avanza despues por webhook. Sin esta distincion el mensaje se queda
+      // con el reloj puesto para siempre.
+      status: capabilitiesFor(target.conversation.channel).deliveryReceipts
+        ? "pending"
+        : "sent",
+      aiGenerated: input.aiGenerated,
+      origin: input.aiGenerated ? "ai" : "operator",
+    });
 
-  return { messageId };
+    return { messageId };
+  } catch (err) {
+    if (err instanceof SendError && SILENT_FAILURE_CODES.has(err.code)) {
+      throw err;
+    }
+    // Bug reportado: un rechazo SÍNCRONO de Meta (destinatario sin teléfono
+    // ni identidad utilizable, número inexistente, etc.) nunca llegaba a
+    // persistirse — a diferencia de sendMediaMessage, que sí deja un mensaje
+    // "failed" visible. El agente respondía en apariencia y el prospecto no
+    // recibía nada, sin ningún rastro en el hilo ni en el panel.
+    const sendErr =
+      err instanceof SendError
+        ? err
+        : new SendError(
+            "meta_error",
+            err instanceof Error ? err.message : "No se pudo enviar el mensaje"
+          );
+    try {
+      sendErr.messageId = await persistOutbound({
+        organizationId: input.organizationId,
+        conversationId: input.conversationId,
+        waMessageId: null,
+        type: "text",
+        text: input.text,
+        status: "failed",
+        error: sendErr.message,
+        aiGenerated: input.aiGenerated,
+        origin: input.aiGenerated ? "ai" : "operator",
+      });
+    } catch (persistErr) {
+      // No dejar que un fallo AL REGISTRAR el fallo oculte el original.
+      console.error(
+        `[send] no se pudo dejar rastro del envío de texto fallido: ${persistErr}`
+      );
+    }
+    throw sendErr;
+  }
 }
 
 /**
@@ -523,7 +576,10 @@ export async function callGraphSend(
       if (err.status === 0 || err.status >= 500) {
         throw new SendError("meta_unavailable", "Meta no está disponible ahora");
       }
-      throw new SendError("meta_error", err.message);
+      // Mismo traductor que ya usa el fallo ASÍNCRONO (status.ts): un rechazo
+      // síncrono con el mismo código (p. ej. 131026) debe leerse igual de
+      // claro, no como la jerga cruda de Meta.
+      throw new SendError("meta_error", describeSendError(err.code, err.message));
     }
     throw err;
   }

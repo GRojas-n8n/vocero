@@ -1,8 +1,6 @@
-import { eq } from "drizzle-orm";
-import { getDb, schema } from "@/lib/db";
 import { buildEventIcs } from "@/lib/ics";
 import { agendaDisabledResponse, agendaEnabled } from "@/server/agenda/flag";
-import { CONNECTOR_META, type ConnectorId } from "@/lib/agenda-connectors";
+import { bookingCopy, getPublicBooking } from "@/server/agenda/public-view";
 
 export const dynamic = "force-dynamic";
 
@@ -22,60 +20,21 @@ export async function GET(_req: Request, ctx: Params) {
   if (!agendaEnabled()) return agendaDisabledResponse();
   const { id } = await ctx.params;
 
-  const db = getDb();
-  const rows = await db
-    .select({
-      id: schema.booking.id,
-      organizationId: schema.booking.organizationId,
-      status: schema.booking.status,
-      scheduledAt: schema.booking.scheduledAt,
-      durationMinutes: schema.booking.durationMinutes,
-      meetingLink: schema.booking.meetingLink,
-      connector: schema.booking.connector,
-      contactId: schema.booking.contactId,
-    })
-    .from(schema.booking)
-    .where(eq(schema.booking.id, id))
-    .limit(1);
-  const booking = rows[0];
+  const booking = await getPublicBooking(id);
   if (!booking) return new Response(null, { status: 404 });
 
-  const [orgRows, contactRows] = await Promise.all([
-    db
-      .select({ name: schema.organization.name })
-      .from(schema.organization)
-      .where(eq(schema.organization.id, booking.organizationId))
-      .limit(1),
-    booking.contactId
-      ? db
-          .select({ name: schema.contact.name })
-          .from(schema.contact)
-          .where(eq(schema.contact.id, booking.contactId))
-          .limit(1)
-      : Promise.resolve([]),
-  ]);
-  const orgName = orgRows[0]?.name?.trim() || "";
-  const contactName = contactRows[0]?.name?.trim() || "";
-
-  const connectorLabel = booking.connector
-    ? CONNECTOR_META[booking.connector as ConnectorId]?.label
-    : undefined;
-  const summary = orgName ? `Cita con ${orgName}` : "Cita agendada";
-  const descriptionLines = [
-    contactName ? `Cita de ${contactName}.` : null,
-    booking.meetingLink ? `Enlace: ${booking.meetingLink}` : null,
-    booking.status === "cancelada" ? "Esta cita fue cancelada." : null,
-  ].filter((l): l is string => Boolean(l));
+  const { title, description } = bookingCopy(booking);
+  const cancelled = booking.status === "cancelada";
 
   const ics = buildEventIcs({
     uid: `${booking.id}@vocero`,
     startUtc: booking.scheduledAt.toISOString(),
     durationMinutes: booking.durationMinutes,
-    summary:
-      booking.status === "cancelada" ? `Cancelada: ${summary}` : summary,
-    description: descriptionLines.join("\n") || undefined,
-    location: booking.meetingLink || connectorLabel,
-    organizerName: orgName || undefined,
+    summary: cancelled ? `Cancelada: ${title}` : title,
+    description: description || undefined,
+    location: booking.meetingLink || booking.connectorLabel,
+    organizerName: booking.orgName || undefined,
+    status: cancelled ? "CANCELLED" : "CONFIRMED",
   });
 
   return new Response(ics, {

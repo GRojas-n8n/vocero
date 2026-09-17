@@ -31,6 +31,7 @@ describe("cuerpo de una reserva creada", () => {
       linkPending: false,
       label: "mié 5 ago, 09:00",
       calendarUrl: expect.stringContaining("/api/agenda/bookings/bk_123/ics"),
+      confirmationUrl: expect.stringContaining("/cita/bk_123"),
     });
   });
 
@@ -39,6 +40,11 @@ describe("cuerpo de una reserva creada", () => {
     expect(payload.calendarUrl).toMatch(
       /^https?:\/\/.+\/api\/agenda\/bookings\/bk_123\/ics$/
     );
+  });
+
+  it("trae la URL de la página de confirmación (Google/Outlook/.ics)", () => {
+    const payload = bookingPayload(result);
+    expect(payload.confirmationUrl).toMatch(/^https?:\/\/.+\/cita\/bk_123$/);
   });
 
   it("`linkPending` viaja SIEMPRE: es lo que decide si se promete el enlace", () => {

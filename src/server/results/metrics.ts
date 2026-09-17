@@ -1,6 +1,6 @@
 import { and, avg, count, countDistinct, eq, gte, isNotNull, lte, or, sql, sum } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
-import { scoped } from "@/lib/db/tenant";
+import { excludingSampleContacts, scoped } from "@/lib/db/tenant";
 import { agendaEnabled } from "@/server/agenda/flag";
 import { rangeBounds } from "./range";
 import type {
@@ -40,6 +40,7 @@ export async function getFunnelSummary(
       scoped(
         schema.lead.organizationId,
         organizationId,
+        excludingSampleContacts(schema.lead.contactId),
         gte(schema.lead.createdAt, start),
         lte(schema.lead.createdAt, end)
       )
@@ -52,6 +53,7 @@ export async function getFunnelSummary(
       scoped(
         schema.leadStageEvent.organizationId,
         organizationId,
+        excludingSampleContacts(schema.leadStageEvent.contactId),
         eq(schema.leadStageEvent.toStageKind, "won"),
         gte(schema.leadStageEvent.occurredAt, start),
         lte(schema.leadStageEvent.occurredAt, end)
@@ -65,6 +67,7 @@ export async function getFunnelSummary(
       scoped(
         schema.leadStageEvent.organizationId,
         organizationId,
+        excludingSampleContacts(schema.leadStageEvent.contactId),
         eq(schema.leadStageEvent.toStageKind, "lost"),
         gte(schema.leadStageEvent.occurredAt, start),
         lte(schema.leadStageEvent.occurredAt, end)
@@ -87,7 +90,13 @@ export async function getFunnelSummary(
         lte(schema.leadStageEvent.occurredAt, end)
       )
     )
-    .where(scoped(schema.lead.organizationId, organizationId));
+    .where(
+      scoped(
+        schema.lead.organizationId,
+        organizationId,
+        excludingSampleContacts(schema.lead.contactId)
+      )
+    );
 
   const [ticketRow] = await db
     .select({ value: avg(schema.lead.amountCents) })
@@ -105,6 +114,7 @@ export async function getFunnelSummary(
       scoped(
         schema.lead.organizationId,
         organizationId,
+        excludingSampleContacts(schema.lead.contactId),
         isNotNull(schema.lead.amountCents),
         inBusinessCurrency(schema.lead.currency, businessCurrency)
       )
@@ -125,6 +135,7 @@ export async function getFunnelSummary(
       scoped(
         schema.lead.organizationId,
         organizationId,
+        excludingSampleContacts(schema.lead.contactId),
         eq(schema.pipelineStage.kind, "open")
       )
     );
@@ -185,7 +196,14 @@ async function getExpectedPipelineValue(
     })
     .from(schema.lead)
     .innerJoin(schema.pipelineStage, eq(schema.pipelineStage.id, schema.lead.stageId))
-    .where(scoped(schema.lead.organizationId, organizationId, eq(schema.pipelineStage.kind, "open")))
+    .where(
+      scoped(
+        schema.lead.organizationId,
+        organizationId,
+        excludingSampleContacts(schema.lead.contactId),
+        eq(schema.pipelineStage.kind, "open")
+      )
+    )
     .groupBy(schema.lead.stageId);
 
   let total = 0;
@@ -222,6 +240,7 @@ export async function getAbandonment(
       scoped(
         schema.leadStageEvent.organizationId,
         organizationId,
+        excludingSampleContacts(schema.leadStageEvent.contactId),
         eq(schema.leadStageEvent.toStageKind, "lost"),
         gte(schema.leadStageEvent.occurredAt, start),
         lte(schema.leadStageEvent.occurredAt, end)
@@ -303,6 +322,7 @@ export async function getAging(organizationId: string): Promise<AgingRow[]> {
       scoped(
         schema.lead.organizationId,
         organizationId,
+        excludingSampleContacts(schema.lead.contactId),
         eq(schema.pipelineStage.kind, "open")
       )
     )
@@ -366,6 +386,7 @@ export async function getStageFunnel(
       scoped(
         schema.leadStageEvent.organizationId,
         organizationId,
+        excludingSampleContacts(schema.leadStageEvent.contactId),
         gte(schema.leadStageEvent.occurredAt, start),
         lte(schema.leadStageEvent.occurredAt, end)
       )
@@ -410,6 +431,7 @@ export async function getLeadSources(
       scoped(
         schema.lead.organizationId,
         organizationId,
+        excludingSampleContacts(schema.lead.contactId),
         gte(schema.lead.createdAt, start),
         lte(schema.lead.createdAt, end)
       )
@@ -432,6 +454,7 @@ export async function getLeadSources(
       scoped(
         schema.leadStageEvent.organizationId,
         organizationId,
+        excludingSampleContacts(schema.leadStageEvent.contactId),
         or(eq(schema.leadStageEvent.toStageKind, "won"), eq(schema.leadStageEvent.toStageKind, "lost")),
         gte(schema.leadStageEvent.occurredAt, start),
         lte(schema.leadStageEvent.occurredAt, end)
@@ -511,6 +534,7 @@ export async function getAgentAppointments(
       scoped(
         schema.booking.organizationId,
         organizationId,
+        excludingSampleContacts(schema.booking.contactId),
         eq(schema.booking.kind, "session"),
         eq(schema.booking.isTest, false),
         gte(schema.booking.createdAt, start),
@@ -568,6 +592,7 @@ export async function getAgentPerformance(
       scoped(
         schema.conversation.organizationId,
         organizationId,
+        excludingSampleContacts(schema.conversation.contactId),
         eq(schema.conversation.isTest, false),
         isNotNull(schema.conversation.handoffAt),
         gte(schema.conversation.handoffAt, start),
@@ -588,6 +613,7 @@ export async function getAgentPerformance(
       scoped(
         schema.message.organizationId,
         organizationId,
+        excludingSampleContacts(schema.conversation.contactId),
         eq(schema.conversation.isTest, false),
         gte(schema.message.createdAt, start),
         lte(schema.message.createdAt, end)

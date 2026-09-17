@@ -91,6 +91,37 @@ export function aiMockCompletion(messages: InMessage[]): string {
     });
   }
 
+  // 015 — Agenda: dispara el mismo camino que un lead real, para poder
+  // probar de punta a punta lo que ve el prospecto (no solo /api/bot/*, que
+  // ya trae su propio catálogo — esto ejercita `offerSlots`/`bookSlot`, el
+  // código que arma el MENSAJE de WhatsApp).
+  //
+  // Los horarios vigentes viajan en el system prompt como
+  // `- <etiqueta> → startUtc: "<iso>"` (ver `buildAgentSystemPrompt`); si ya
+  // hay alguno y el cliente suena a que está aceptando uno, agenda el
+  // PRIMERO — determinista, para que el self-test sepa cuál pedir de vuelta.
+  const offeredStarts = [...system.matchAll(/→ startUtc: "([^"]+)"/g)].map(
+    (m) => m[1]!
+  );
+  if (
+    offeredStarts.length > 0 &&
+    /confirmo|acepto|ese (día|horario)|esa hora|el primero|me sirve|s[ií],? agenda|agendamos|res[ée]rvame|ap[uú]ntame/.test(
+      text
+    )
+  ) {
+    return JSON.stringify({
+      action: "book_slot",
+      startUtc: offeredStarts[0],
+      reply: "¡Perfecto! Te confirmo tu cita.",
+    });
+  }
+  if (/agendar|\bcita\b|horario/.test(text)) {
+    return JSON.stringify({
+      action: "offer_slots",
+      reply: "Claro, aquí tienes algunos horarios disponibles:",
+    });
+  }
+
   const eco = lastUser.slice(0, 80);
   return JSON.stringify({
     action: "reply",

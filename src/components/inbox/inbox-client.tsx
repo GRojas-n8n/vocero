@@ -93,18 +93,24 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
     void refetchConversations();
   }, [refetchConversations]);
 
+  const markRead = useCallback((id: string) => {
+    void fetch(`/api/conversations/${id}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ markRead: true }),
+    });
+  }, []);
+
   const select = useCallback(
     (id: string) => {
       setSelectedId(id);
       setMessages([]);
       void refetchMessages(id);
-      void fetch(`/api/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ markRead: true }),
-      });
+      // Abrir el hilo SÍ cuenta como "leído": es una acción explícita del
+      // operador, a diferencia del push de un mensaje nuevo de abajo.
+      markRead(id);
     },
-    [refetchMessages]
+    [refetchMessages, markRead]
   );
 
   // Enlace directo desde Contactos/Pipeline: /inbox?contact=<id>
@@ -116,6 +122,38 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
     if (match) select(match.id);
   }, [contactParam, conversations, select]);
 
+  /**
+   * Bug reportado: un mensaje del prospecto se daba por "leído" solo porque
+   * su conversación era la seleccionada cuando llegó por SSE — aunque la
+   * pestaña estuviera en segundo plano o la ventana sin foco (el mismo
+   * mix-up de [[feedback-bot-no-responde-diagnostico]]: tener el hilo abierto
+   * no equivale a haberlo visto). Sin este chequeo, "No leídas: 0" no
+   * garantizaba que alguien hubiera mirado el mensaje, y mucho menos que se
+   * le hubiera respondido — de ahí la confusión con "pendiente de responder"
+   * (ver server/inbox/pending.ts para esa distinción).
+   */
+  const isReallyVisible = () =>
+    typeof document !== "undefined" &&
+    document.visibilityState === "visible" &&
+    document.hasFocus();
+
+  // Si el operador vuelve a la pestaña con el hilo ya abierto, ESE regreso sí
+  // cuenta como lectura — sin esto, un mensaje llegado en segundo plano se
+  // quedaría "no leído" para siempre hasta reseleccionar la conversación.
+  useEffect(() => {
+    function onFocusOrVisible() {
+      if (selectedIdRef.current && isReallyVisible()) {
+        markRead(selectedIdRef.current);
+      }
+    }
+    document.addEventListener("visibilitychange", onFocusOrVisible);
+    window.addEventListener("focus", onFocusOrVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onFocusOrVisible);
+      window.removeEventListener("focus", onFocusOrVisible);
+    };
+  }, [markRead]);
+
   useEvents({
     onMessageNew: ({ conversationId, message }) => {
       if (selectedIdRef.current === conversationId) {
@@ -123,11 +161,7 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
         setMessages((prev) =>
           prev.some((x) => x.id === m.id) ? prev : [...prev, m]
         );
-        void fetch(`/api/conversations/${conversationId}`, {
-          method: "PATCH",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ markRead: true }),
-        });
+        if (isReallyVisible()) markRead(conversationId);
       }
       void refetchConversations();
       // Un entrante nuevo puede crear/mover el lead: refresca el panel.
@@ -152,12 +186,19 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
       // El agente movió de etapa o cambió el handoff: refresca el panel en vivo.
       setDetailRev((v) => v + 1);
     },
-    onMessageMedia: ({ conversationId, messageId, caption }) => {
+    onMessageMedia: ({ conversationId, messageId, caption, transcribeError }) => {
       if (selectedIdRef.current !== conversationId) return;
       setMessages((prev) =>
         prev.map((m) =>
           m.id === messageId && m.media
-            ? { ...m, media: { ...m.media, caption } }
+            ? {
+                ...m,
+                media: {
+                  ...m.media,
+                  caption,
+                  transcribeError: transcribeError ?? null,
+                },
+              }
             : m
         )
       );

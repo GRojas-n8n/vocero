@@ -31,6 +31,9 @@ export function ContactsClient() {
   const [stage, setStage] = useState("all");
   const [stages, setStages] = useState<string[]>([]);
   const [showArchived, setShowArchived] = useState(false);
+  // Fase 4: por defecto se ven (esta pantalla es donde se administran/
+  // desmarcan); ocultarlos es una preferencia de vista, nunca borra nada.
+  const [hideSamples, setHideSamples] = useState(false);
   const [editing, setEditing] = useState<ContactDto | null>(null);
   const [creando, setCreando] = useState(false);
   const [escribiendo, setEscribiendo] = useState<ContactDto | null>(null);
@@ -84,6 +87,12 @@ export function ContactsClient() {
     void refetch();
   }
 
+  // Filtro de vista, no de borrado: los datos de prueba/sistema siguen en la
+  // BD y en esta misma lista con el toggle apagado (default).
+  const visibleContacts = hideSamples
+    ? contacts.filter((c) => !c.sampleType)
+    : contacts;
+
   return (
     <div className="flex h-full flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:gap-4 sm:px-6 sm:py-4">
@@ -103,6 +112,15 @@ export function ContactsClient() {
               className="accent-primary"
             />
             Ver archivados
+          </label>
+          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={hideSamples}
+              onChange={(e) => setHideSamples(e.target.checked)}
+              className="accent-primary"
+            />
+            Ocultar datos de prueba/sistema
           </label>
           {stages.length > 0 && (
             <select
@@ -134,7 +152,7 @@ export function ContactsClient() {
       </header>
 
       <div className="flex-1 overflow-y-auto p-4 sm:p-6">
-        {contacts.length === 0 ? (
+        {visibleContacts.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
             {query.trim() || stage !== "all" ? (
               <>
@@ -158,7 +176,7 @@ export function ContactsClient() {
           </div>
         ) : (
           <ul className="space-y-2">
-            {contacts.map((c) => (
+            {visibleContacts.map((c) => (
               <li
                 key={c.id}
                 className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border bg-card px-3 py-3 sm:flex-nowrap sm:gap-x-4 sm:px-4"
@@ -177,6 +195,16 @@ export function ContactsClient() {
                     )}
                     {c.archivedAt && (
                       <Badge variant="secondary">Archivado</Badge>
+                    )}
+                    {/* Fase 4: marca manual — nunca automática — de que este
+                        contacto no es un prospecto real (ver EditDialog). */}
+                    {c.sampleType && (
+                      <Badge
+                        variant="warning"
+                        title="No cuenta en Resultados/Pipeline/Bandeja"
+                      >
+                        {c.sampleType === "demo" ? "Demostración" : "Sistema"}
+                      </Badge>
                     )}
                     {/* Solo la fuente que alguien capturó: presentar una
                         deducción como dato la volvería un número inventado en
@@ -306,10 +334,17 @@ function EditDialog({
 }: {
   contact: ContactDto;
   onClose: () => void;
-  onSave: (patch: { name: string; notes: string }) => Promise<void>;
+  onSave: (patch: {
+    name: string;
+    notes: string;
+    sampleType: "demo" | "system" | null;
+  }) => Promise<void>;
 }) {
   const [name, setName] = useState(contact.name);
   const [notes, setNotes] = useState(contact.notes ?? "");
+  const [sampleType, setSampleType] = useState<"demo" | "system" | null>(
+    contact.sampleType ?? null
+  );
 
   return (
     <div
@@ -343,6 +378,32 @@ function EditDialog({
               onChange={(e) => setNotes(e.target.value)}
             />
           </div>
+          <div className="space-y-1.5 rounded-md border border-warning-soft bg-warning-tint p-3">
+            <label className="text-sm font-medium" htmlFor="edit-sample-type">
+              Tipo de dato
+            </label>
+            <select
+              id="edit-sample-type"
+              value={sampleType ?? "real"}
+              onChange={(e) =>
+                setSampleType(
+                  e.target.value === "real"
+                    ? null
+                    : (e.target.value as "demo" | "system")
+                )
+              }
+              className="h-9 w-full rounded-md border border-input bg-card px-2 text-sm"
+            >
+              <option value="real">Prospecto real (normal)</option>
+              <option value="demo">Dato de demostración</option>
+              <option value="system">Contacto del sistema</option>
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Marca manual: excluye a este contacto de Resultados, Pipeline y
+              la Bandeja sin borrarlo. No se hace sola — solo cambia si tú lo
+              cambias aquí.
+            </p>
+          </div>
         </div>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>
@@ -350,7 +411,7 @@ function EditDialog({
           </Button>
           <Button
             disabled={!name.trim()}
-            onClick={() => void onSave({ name: name.trim(), notes })}
+            onClick={() => void onSave({ name: name.trim(), notes, sampleType })}
           >
             Guardar
           </Button>

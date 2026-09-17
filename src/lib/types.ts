@@ -14,6 +14,9 @@ export type ConversationDto = {
   lastInboundAt: string | null;
   lastMessageAt: string | null;
   unreadCount: number;
+  /** Distinto de "sin leer": el último mensaje es del prospecto y nadie (ni
+   *  el agente ni un humano) le ha respondido todavía. */
+  pendingReply: boolean;
   windowOpen: boolean;
   windowRemainingMs: number;
   preview: string | null;
@@ -35,6 +38,13 @@ export type MessageMediaDto = {
   fileSize: number | null;
   caption: string | null;
   fetchStatus: "available" | "pending" | "failed";
+  /** Motivo cuando `fetchStatus === "failed"` (Meta ya no tiene el archivo,
+   *  excedió el límite, etc.). */
+  fetchError: string | null;
+  /** Solo audio: motivo si la transcripción se intentó y no dio resultado.
+   *  Distinto de `fetchStatus: "failed"` (eso es NO DESCARGAR el archivo;
+   *  esto es descargarlo bien y no poder entenderlo). */
+  transcribeError: string | null;
   /** location {latitude, longitude, name?, address?} / contacts (subset). */
   payload: unknown;
 };
@@ -97,6 +107,14 @@ export type ContactDto = {
   priority?: PriorityValue | null;
   /** Lo que se sabe del lead. `{}` mientras nadie haya calificado. */
   ficha?: FichaDto;
+  /**
+   * Fase 4 (auditoría 2026-09) — marca MANUAL de dato de prueba/sistema:
+   * `demo` (seedDemo) o `system` (contacto que crea Meta al probar el
+   * webhook, número propio, etc.). NULL = prospecto real (todo contacto
+   * existente y nuevo, salvo que el operador lo marque a mano). Excluido de
+   * Resultados/Pipeline/Bandeja cuando no es null.
+   */
+  sampleType?: "demo" | "system" | null;
 };
 
 /* ============================================================

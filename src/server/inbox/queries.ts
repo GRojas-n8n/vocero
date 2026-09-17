@@ -1,7 +1,8 @@
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
 import { isWindowOpen, windowRemainingMs } from "@/server/inbox/window";
+import { isPendingReply } from "@/server/inbox/pending";
 import type { ConversationDto } from "@/lib/types";
 
 export async function listConversations(
@@ -22,6 +23,16 @@ export async function listConversations(
     where l.contact_id = ${schema.contact.id}
     limit 1
   )`;
+  // Bug reportado: un envío rechazado por Meta (131026, etc.) avanzaba
+  // `lastMessageAt` igual que uno exitoso — el prospecto se quedaba sin nada
+  // y la conversación no se veía "pendiente". Ver server/inbox/pending.ts.
+  const lastMessageFailedSql = sql<boolean>`(
+    select coalesce(m.direction = 'out' and m.status = 'failed', false)
+    from message m
+    where m.conversation_id = ${schema.conversation.id}
+    order by m.created_at desc
+    limit 1
+  )`;
 
   const rows = await db
     .select({
@@ -29,6 +40,7 @@ export async function listConversations(
       contact: schema.contact,
       preview: previewSql,
       stageName: stageSql,
+      lastMessageFailed: lastMessageFailedSql,
     })
     .from(schema.conversation)
     .innerJoin(
@@ -40,13 +52,23 @@ export async function listConversations(
         schema.conversation.organizationId,
         organizationId,
         eq(schema.conversation.isTest, false),
+        // Fase 4: un contacto marcado a mano como demo/sistema (ver
+        // schema.ts `contact.sampleType`) no debe mezclarse con conversaciones
+        // reales en la Bandeja — se administra/desmarca desde Contactos.
+        isNull(schema.contact.sampleType),
         since ? gt(schema.conversation.updatedAt, since) : undefined
       )
     )
     .orderBy(desc(sql`coalesce(${schema.conversation.lastMessageAt}, ${schema.conversation.createdAt})`));
 
   return rows.map((r) =>
-    serializeConversation(r.conversation, r.contact, r.preview, r.stageName)
+    serializeConversation(
+      r.conversation,
+      r.contact,
+      r.preview,
+      r.stageName,
+      r.lastMessageFailed
+    )
   );
 }
 
@@ -55,8 +77,19 @@ export async function getConversation(
   conversationId: string
 ) {
   const db = getDb();
+  const lastMessageFailedSql = sql<boolean>`(
+    select coalesce(m.direction = 'out' and m.status = 'failed', false)
+    from message m
+    where m.conversation_id = ${schema.conversation.id}
+    order by m.created_at desc
+    limit 1
+  )`;
   const rows = await db
-    .select({ conversation: schema.conversation, contact: schema.contact })
+    .select({
+      conversation: schema.conversation,
+      contact: schema.contact,
+      lastMessageFailed: lastMessageFailedSql,
+    })
     .from(schema.conversation)
     .innerJoin(
       schema.contact,
@@ -101,7 +134,8 @@ export function serializeConversation(
   c: typeof schema.conversation.$inferSelect,
   contact: typeof schema.contact.$inferSelect,
   preview: string | null = null,
-  stageName: string | null = null
+  stageName: string | null = null,
+  lastMessageFailed = false
 ): ConversationDto {
   return {
     id: c.id,
@@ -114,6 +148,12 @@ export function serializeConversation(
     lastInboundAt: c.lastInboundAt?.toISOString() ?? null,
     lastMessageAt: c.lastMessageAt?.toISOString() ?? null,
     unreadCount: c.unreadCount,
+    pendingReply: isPendingReply(
+      c.lastInboundAt,
+      c.lastMessageAt,
+      new Date(),
+      lastMessageFailed
+    ),
     windowOpen: isWindowOpen(c.lastInboundAt),
     windowRemainingMs: windowRemainingMs(c.lastInboundAt),
     preview,

@@ -209,7 +209,7 @@ export function BookingsClient() {
                     Enlace de la reunión
                   </a>
                 )}
-                {b.notes && <span>{b.notes}</span>}
+                {b.notes && <span>Motivo: {b.notes}</span>}
               </div>
 
               {/* El proveedor falló al crear la reunión. La cita existe; lo

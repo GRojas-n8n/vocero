@@ -1135,6 +1135,12 @@ async function agendaChecks() {
       icsApagado.status === 404,
       `status=${icsApagado.status}`
     );
+    const confApagada = await fetch(`${BASE}/cita/x`);
+    ok(
+      "/cita/:id (página de confirmación) → 404 con la agenda apagada",
+      confApagada.status === 404,
+      `status=${confApagada.status}`
+    );
     console.log("  (agenda apagada: el resto de los checks de 015 no aplican)");
     return;
   }
@@ -1290,6 +1296,55 @@ async function agendaChecks() {
       icsBody.includes(`UID:${creada.json.bookingId}@vocero`),
     `status=${icsRes.status} ct=${icsRes.headers.get("content-type")}`
   );
+  ok(
+    "una cita VIGENTE se publica como CONFIRMED, no CANCELLED",
+    icsBody.includes("STATUS:CONFIRMED") && icsBody.includes("METHOD:PUBLISH"),
+    icsBody
+  );
+
+  // La página de confirmación: lo que el prospecto abre en vez del .ics a
+  // secas, con los datos REALES de la cita y los botones de Google/Outlook.
+  ok(
+    "la respuesta trae la URL de la página de confirmación",
+    typeof creada.json?.confirmationUrl === "string" &&
+      creada.json.confirmationUrl.includes(`/cita/${creada.json.bookingId}`),
+    JSON.stringify(creada.json?.confirmationUrl)
+  );
+  const confRes = await fetch(creada.json.confirmationUrl);
+  const confBody = await confRes.text();
+  const utcCompact = (iso) =>
+    new Date(iso).toISOString().replace(/[-:]/g, "").split(".")[0] + "Z";
+  const finElegido = new Date(Date.parse(elegido) + 30 * 60_000).toISOString();
+  ok(
+    "la página de confirmación responde 200 en HTML",
+    confRes.status === 200 &&
+      (confRes.headers.get("content-type") ?? "").includes("text/html"),
+    `status=${confRes.status} ct=${confRes.headers.get("content-type")}`
+  );
+  ok(
+    "trae el enlace de la sala fija de ESTA cita",
+    confBody.includes(SALA),
+    "no se encontró el enlace de la sala"
+  );
+  ok(
+    "el botón de Google Calendar lleva el instante EXACTO que se reservó",
+    confBody.includes("calendar.google.com/calendar/render") &&
+      confBody.includes(
+        encodeURIComponent(`${utcCompact(elegido)}/${utcCompact(finElegido)}`)
+      ),
+    "no se encontró el rango de fechas esperado en el enlace de Google"
+  );
+  ok(
+    "el botón de Outlook también lleva el instante reservado",
+    confBody.includes("outlook.live.com") &&
+      confBody.includes(encodeURIComponent(elegido)),
+    "no se encontró el enlace de Outlook con la fecha esperada"
+  );
+  ok(
+    "deja claro que hay que confirmar Guardar: nada se agenda solo",
+    confBody.includes("Guardar"),
+    "no se encontró la instrucción de confirmar Guardar"
+  );
 
   const dispTrasReserva = (await api("/api/calendar/availability")).json?.slots ?? [];
   ok(
@@ -1376,6 +1431,69 @@ async function agendaChecks() {
     );
   }
 
+  console.log(
+    "\n== 015: el mensaje REAL que Max le manda al prospecto (offer_slots) =="
+  );
+  // Bug reportado en producción: el negocio tenía agenda miércoles, jueves,
+  // viernes y lunes, pero el mensaje que Max mandó por WhatsApp solo traía
+  // horarios del miércoles. `/api/bot/*` (arriba) ejercita el CATÁLOGO crudo,
+  // pero el mensaje que ve el prospecto lo arma `agenda/agent.ts` — otro
+  // código, con su propio bug — así que hace falta empujar el camino
+  // conversacional REAL: inbound → pipeline del agente in-process → ai-mock.
+  //
+  // El resto de este guion deja el agente in-process APAGADO a propósito
+  // (`enabled: false` en "perfil del agente"), para probar `/api/bot/*` en
+  // aislamiento sin que el agente incluido conteste por su cuenta. Aquí se
+  // enciende solo para esta sección y se apaga de vuelta al terminar.
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true }),
+  });
+  const LEAD_MAX = "5214627015004";
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_MAX,
+      name: `Lead agenda Max ${RUN}`,
+      text: "quiero agendar una cita",
+      waMessageId: `wamid.e2e.015.max.${RUN}.1`,
+    }),
+  });
+  // A diferencia de /api/bot/*, un inbound real pasa por el debounce de
+  // AGENT_COALESCE_MS (6000ms por defecto) antes de correr el turno.
+  const coalesceMs = Number(process.env.AGENT_COALESCE_MS ?? 6000);
+  await sleep(coalesceMs + 3000);
+
+  // El envío sale al teléfono NORMALIZADO (521→52), no al `from` crudo del
+  // inbound — mismo criterio que `convA`/`convB` más arriba.
+  const LEAD_MAX_NORM = LEAD_MAX.replace(/^521/, "52");
+  const outboxMax = (await api("/api/dev/wa-mock/outbox")).json?.outbox ?? [];
+  const msgMax = outboxMax.filter((o) => o.to === LEAD_MAX_NORM).pop();
+  ok(
+    "Max respondió ofreciendo horarios",
+    typeof msgMax?.body?.text?.body === "string",
+    JSON.stringify(msgMax)
+  );
+  const textoMax = msgMax?.body?.text?.body ?? "";
+  const lineasMax = textoMax.split("\n").filter((l) => l.startsWith("• "));
+  ok(
+    "el mensaje trae varias opciones de horario",
+    lineasMax.length >= 2,
+    textoMax
+  );
+  const diasMax = new Set(lineasMax.map((l) => l.split(" a las ")[0]));
+  ok(
+    "el mensaje de Max cubre MÁS DE UN DÍA (no repite el mismo día las 3 veces)",
+    diasMax.size > 1,
+    JSON.stringify(lineasMax)
+  );
+  // Se apaga de vuelta: el resto del guion asume el agente in-process OFF.
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: false }),
+  });
+
   console.log("\n== 015: el operador y el enlace pendiente (US4) ==");
   const bookingId = creada.json?.bookingId;
   const cancelada1 = await api(`/api/bookings/${bookingId}`, {
@@ -1390,6 +1508,34 @@ async function agendaChecks() {
     "cancelar dos veces no falla (idempotente)",
     cancelada1.res.ok && cancelada2.res.ok,
     `${cancelada1.res.status}/${cancelada2.res.status}`
+  );
+
+  // Una cita cancelada NO debe seguir ofreciendo "agrégala a tu calendario"
+  // con datos que ya no son ciertos — ni la página, ni el .ics deben verse
+  // como si la cita siguiera en pie.
+  const confCancelBody = await (await fetch(creada.json.confirmationUrl)).text();
+  ok(
+    "la página de confirmación de una cita CANCELADA lo dice explícito",
+    /cancel/i.test(confCancelBody),
+    "no se encontró aviso de cancelación en la página"
+  );
+  ok(
+    "…y YA NO ofrece los botones de Google/Outlook (serían datos viejos)",
+    !confCancelBody.includes("calendar.google.com/calendar/render") &&
+      !confCancelBody.includes("outlook.live.com"),
+    "los botones de agregar al calendario seguían presentes tras cancelar"
+  );
+  const icsCancelRes = await fetch(creada.json.calendarUrl);
+  const icsCancelBody = await icsCancelRes.text();
+  ok(
+    "el .ics de una cita cancelada se publica como CANCELLED (METHOD:CANCEL)",
+    icsCancelRes.status === 200 &&
+      icsCancelBody.includes("STATUS:CANCELLED") &&
+      icsCancelBody.includes("METHOD:CANCEL") &&
+      // MISMO UID: es lo que le permite a un cliente de calendario que ya
+      // había guardado la cita reconciliar la cancelación con ese evento.
+      icsCancelBody.includes(`UID:${bookingId}@vocero`),
+    icsCancelBody
   );
 
   const reintentoInvalido = await api(`/api/bookings/${bookingId}`, {

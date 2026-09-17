@@ -12,11 +12,12 @@ export type EventHandlers = {
     error?: string | null;
   }) => void;
   onConversationUpdated?: (data: { conversation: unknown }) => void;
-  /** 018 — la transcripción de una nota de voz quedó lista. */
+  /** 018 — la transcripción de una nota de voz terminó (con o sin éxito). */
   onMessageMedia?: (data: {
     conversationId: string;
     messageId: string;
-    caption: string;
+    caption: string | null;
+    transcribeError?: string | null;
   }) => void;
   onLabRun?: (data: {
     runId: string;

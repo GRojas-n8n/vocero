@@ -1,7 +1,7 @@
 import { appBaseUrl } from "@/lib/env";
 import { computeAvailability } from "@/server/agenda/availability";
 import { getSettings } from "@/server/agenda/settings";
-import { spreadByDay } from "@/server/agenda/spread";
+import { pickAcrossDays, spreadByDay } from "@/server/agenda/spread";
 import { replaceOffers } from "@/server/agenda/offers";
 import { BookingError, createSessionBooking } from "@/server/agenda/service";
 
@@ -65,7 +65,10 @@ export async function offerSlots(input: {
     spread.map((s) => ({ startUtc: s.startUtc, label: s.label }))
   );
 
-  const shown = spread.slice(0, SHOWN);
+  // `spread` ya viene agrupado por día en orden cronológico: tomar los
+  // primeros SHOWN a secas mostraría solo el primer día si ese día por sí
+  // solo llena el menú. `pickAcrossDays` reparte por variedad primero.
+  const shown = pickAcrossDays(spread, SHOWN);
   const lista = shown.map((s) => `• ${s.dayLabel} a las ${s.time}`).join("\n");
   const intro = input.intro?.trim() || "Tengo estos horarios disponibles:";
   return { ok: true, text: `${intro}\n${lista}` };
@@ -76,6 +79,8 @@ export async function bookSlot(input: {
   conversationId: string;
   startUtc: string;
   confirmation?: string;
+  /** Fase 5 — motivo breve tomado de la conversación; ver actions.ts. */
+  reason?: string;
 }): Promise<AgendaTurn> {
   try {
     const result = await createSessionBooking({
@@ -84,15 +89,17 @@ export async function bookSlot(input: {
       startUtc: input.startUtc,
       source: "ai",
       requireOffer: true,
+      notes: input.reason?.trim() || null,
     });
 
     const base =
       input.confirmation?.trim() || `¡Listo! Te agendé para ${result.label}.`;
-    // El .ics se genera al vuelo desde la cita real: si el enlace de reunión
-    // llega después (linkPending), igual queda dentro cuando el prospecto
-    // abra este link — no se re-envía nada.
-    const calendarUrl = `${appBaseUrl()}/api/agenda/bookings/${result.booking.id}/ics`;
-    const guardar = `Guárdala en tu calendario: ${calendarUrl}`;
+    // La página de confirmación se lee SIEMPRE en vivo desde la cita real
+    // (public-view.ts): si el enlace de reunión llega después (linkPending) o
+    // la cita se mueve o se cancela, quien abra este link ve el estado actual
+    // — nunca datos de cuando se mandó el mensaje.
+    const confirmationUrl = `${appBaseUrl()}/cita/${result.booking.id}`;
+    const guardar = `Guárdala en tu calendario (Google, Outlook o .ics): ${confirmationUrl}`;
     if (result.meetingLink) {
       return {
         ok: true,

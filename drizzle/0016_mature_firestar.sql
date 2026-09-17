@@ -1,0 +1,1 @@
+ALTER TABLE "media_asset" ADD COLUMN "transcribe_error" text;

@@ -272,6 +272,22 @@ export function dayLabelInTz(startUtc: string, tz: string, now?: Date): string {
   return `${prefijo}${cuerpo}`;
 }
 
+/**
+ * Etiqueta de la zona horaria para el prospecto: "America/Mexico_City
+ * (GMT-6)". El offset se calcula EN el instante dado (respeta el horario de
+ * verano), para que la página de confirmación nunca contradiga la hora que
+ * ella misma está mostrando.
+ */
+export function timezoneLabel(tz: string, at: Date): string {
+  const offset = tzOffsetMinutes(at, tz);
+  const sign = offset < 0 ? "-" : "+";
+  const abs = Math.abs(offset);
+  const hh = Math.floor(abs / 60);
+  const mm = abs % 60;
+  const gmt = mm === 0 ? `GMT${sign}${hh}` : `GMT${sign}${hh}:${String(mm).padStart(2, "0")}`;
+  return `${tz} (${gmt})`;
+}
+
 /** Partes por separado para la tabla de Citas. */
 export function partsInTz(
   startUtc: string,

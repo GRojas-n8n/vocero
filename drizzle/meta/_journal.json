@@ -113,6 +113,27 @@
       "when": 1789202393423,
       "tag": "0015_majestic_jamie_braddock",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1789589187496,
+      "tag": "0016_mature_firestar",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1789603806298,
+      "tag": "0017_cold_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1789608523552,
+      "tag": "0018_luxuriant_dexter_bennett",
+      "breakpoints": true
     }
   ]
 }

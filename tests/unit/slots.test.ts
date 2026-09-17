@@ -8,6 +8,7 @@ import {
   overlaps,
   partsInTz,
   timeInTz,
+  timezoneLabel,
   todayInTz,
   weekdayKeyOf,
   zonedWallClockToUtc,
@@ -258,5 +259,31 @@ describe("isValidTimeZone", () => {
     expect(isValidTimeZone(MX)).toBe(true);
     expect(isValidTimeZone("Europe/Madrid")).toBe(true);
     expect(isValidTimeZone("Marte/Olympus")).toBe(false);
+  });
+});
+
+describe("timezoneLabel", () => {
+  it("incluye el nombre IANA y el offset vigente en ese instante", () => {
+    // Agosto: México sin horario de verano desde 2022 ⇒ GMT-6 todo el año.
+    expect(timezoneLabel(MX, new Date("2026-08-05T15:00:00.000Z"))).toBe(
+      "America/Mexico_City (GMT-6)"
+    );
+  });
+
+  it("respeta el horario de verano vigente en el instante dado", () => {
+    // Nueva York: GMT-4 en agosto (verano), GMT-5 en enero (invierno).
+    expect(timezoneLabel(NY, new Date("2026-08-05T15:00:00.000Z"))).toBe(
+      "America/New_York (GMT-4)"
+    );
+    expect(timezoneLabel(NY, new Date("2026-01-05T15:00:00.000Z"))).toBe(
+      "America/New_York (GMT-5)"
+    );
+  });
+
+  it("formatea minutos de offset distintos de :00", () => {
+    // India: GMT+5:30 todo el año.
+    expect(
+      timezoneLabel("Asia/Kolkata", new Date("2026-08-05T15:00:00.000Z"))
+    ).toBe("Asia/Kolkata (GMT+5:30)");
   });
 });

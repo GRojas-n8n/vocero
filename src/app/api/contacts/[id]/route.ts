@@ -44,6 +44,11 @@ const patchSchema = z.object({
    * borrara lo recién descubierto al otro.
    */
   ficha: z.record(z.unknown()).optional(),
+  /**
+   * Fase 4 — marca MANUAL de dato de prueba/sistema; `null` la quita. Nunca
+   * se fija sola: solo llega aquí por una acción explícita del operador.
+   */
+  sampleType: z.enum(["demo", "system"]).nullable().optional(),
 });
 
 export const PATCH = withAuth(async (session, req: Request, ctx: Params) => {
@@ -69,6 +74,7 @@ export const PATCH = withAuth(async (session, req: Request, ctx: Params) => {
   if (body.data.archived !== undefined) {
     set.archivedAt = body.data.archived ? new Date() : null;
   }
+  if (body.data.sampleType !== undefined) set.sampleType = body.data.sampleType;
 
   const db = getDb();
   const updated = await db

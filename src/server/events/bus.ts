@@ -19,10 +19,16 @@ export type SseEvent =
       };
     }
   | { type: "conversation.updated"; data: { conversation: unknown } }
-  /** 018 — la transcripción de una nota de voz quedó lista tras la descarga. */
+  /** 018 — la transcripción de una nota de voz terminó (con o sin éxito). */
   | {
       type: "message.media";
-      data: { conversationId: string; messageId: string; caption: string };
+      data: {
+        conversationId: string;
+        messageId: string;
+        caption: string | null;
+        /** Motivo si la transcripción falló; null si dio resultado. */
+        transcribeError?: string | null;
+      };
     }
   /** 015 — algo cambió en la agenda: la pantalla de Citas se refresca sola. */
   | { type: "booking.updated"; data: { bookingId: string } }
