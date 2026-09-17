@@ -18,7 +18,7 @@ import {
 import { matchesHandoffIntent } from "@/server/ai/handoff";
 import { buildAgentSystemPrompt } from "@/server/ai/prompts";
 import { agendaEnabled } from "@/server/agenda/flag";
-import { bookSlot, offerSlots } from "@/server/agenda/agent";
+import { bookSlot, offerSlots, recordRescheduleRequest } from "@/server/agenda/agent";
 import { getOffers } from "@/server/agenda/offers";
 import { awaitMediaJob } from "@/server/whatsapp/media";
 
@@ -347,6 +347,7 @@ export async function runAgentTurn(
                 startUtc: action.startUtc,
                 confirmation: action.reply,
                 reason: action.reason,
+                confirmAdditional: action.confirmAdditional,
               });
         await deliverReply(conversation, turn.text);
         if (turn.ok) {
@@ -360,6 +361,35 @@ export async function runAgentTurn(
         console.error(`[agente] el motor de agenda falló: ${err}`);
         action = degradeAction(action);
       }
+    }
+  }
+
+  // Auditoría 2026-09-17 — el agente incluido no tiene una herramienta de
+  // reprogramación segura (mover la cita ATÓMICAMENTE requiere saber a cuál
+  // instante moverla y el modelo no elige eso aquí): se registra el pedido
+  // como estado persistente y se deriva SIEMPRE a un humano. El traspaso se
+  // aplica pase lo que pase con la persistencia — mismo criterio que el
+  // "handoff" de abajo: nunca dejar al agente agendando por su cuenta sobre
+  // una cita que el cliente pidió mover.
+  if (action.action === "request_reschedule") {
+    if (!agenda) {
+      action = degradeAction(action);
+    } else {
+      const turn = await recordRescheduleRequest({
+        organizationId,
+        conversationId,
+        contactId: conversation.contactId,
+        note: action.note,
+      });
+      await applyHandoff(conversationId, organizationId, "reprogramacion");
+      try {
+        await deliverReply(conversation, action.reply?.trim() || turn.text);
+      } catch (err) {
+        console.error(
+          `[agente] traspaso por reprogramación aplicado pero el aviso no se pudo enviar: ${err}`
+        );
+      }
+      return;
     }
   }
 
@@ -467,7 +497,7 @@ async function persistTestOutbound(
 export async function applyHandoff(
   conversationId: string,
   organizationId: string,
-  reason: "cliente" | "modelo" | "error" | "ventana"
+  reason: "cliente" | "modelo" | "error" | "ventana" | "reprogramacion"
 ): Promise<void> {
   const db = getDb();
   // Idempotente a propósito (WHERE handoff_at IS NULL): un segundo intento de

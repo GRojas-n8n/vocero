@@ -58,6 +58,11 @@ export function bookingErrorStatus(code: BookingError["code"]): number {
       return 422;
     case "slot_taken":
     case "slot_not_offered":
+    // Auditoría 2026-09-17 — mismo trato que los otros conflictos: el
+    // recurso pedido no se puede crear TAL CUAL, y quien llama ya trae en el
+    // cuerpo lo que necesita para decidir (la cita existente, o esperar).
+    case "existing_booking":
+    case "reschedule_pending":
       return 409;
   }
 }
@@ -67,7 +72,14 @@ export function bookingErrorResponse(err: unknown): Response {
   if (!(err instanceof BookingError)) throw err;
   const code = err.code === "invalid" ? "invalid_body" : err.code;
   return Response.json(
-    { error: { code, message: err.message }, slots: err.slots },
+    {
+      error: { code, message: err.message },
+      slots: err.slots,
+      // Auditoría 2026-09-17 — la cita (o el pedido) que bloqueó la creación,
+      // para que el cerebro externo la nombre en vez de responder en
+      // genérico. `null` en cualquier otro código: campo aditivo.
+      existing: err.existing,
+    },
     { status: bookingErrorStatus(err.code) }
   );
 }

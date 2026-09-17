@@ -27,6 +27,15 @@ const createSchema = z.object({
   conversationId: z.string().min(1),
   startUtc: z.string().min(1),
   notes: z.string().nullish(),
+  /**
+   * Auditoría 2026-09-17 — true SOLO si quien conduce la conversación
+   * confirmó, de forma explícita y no inferida, que esto es una reunión
+   * APARTE de una cita activa que el contacto ya tiene. Sin esto, una
+   * segunda cita para el mismo contacto se bloquea con 409
+   * `existing_booking`/`reschedule_pending` — nunca se crea en silencio.
+   * Exige `notes` no vacío: es la constancia escrita de por qué es aparte.
+   */
+  confirmAdditional: z.boolean().optional(),
 });
 
 const rescheduleSchema = z.object({
@@ -50,6 +59,7 @@ export async function POST(req: Request) {
       source: "ai",
       // La regla innegociable: el agente solo reserva lo que ya ofreció.
       requireOffer: true,
+      allowAdditional: body.data.confirmAdditional === true,
     });
     return Response.json(bookingPayload(result), { status: 201 });
   } catch (err) {

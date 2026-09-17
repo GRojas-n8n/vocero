@@ -356,6 +356,9 @@ export const conversation = pgTable(
     handoffReason: text("handoff_reason", {
       // 008: manual_reply = el dueño respondió desde la app del teléfono.
       // hostilidad = el lead se puso agresivo y el agente se retiró.
+      // reprogramacion (auditoría 2026-09-17): el cliente pidió mover una cita
+      // y no hay una herramienta de reprogramación segura para el agente
+      // incluido — se deriva y se bloquea una cita sustitutiva.
       enum: [
         "cliente",
         "modelo",
@@ -363,6 +366,7 @@ export const conversation = pgTable(
         "ventana",
         "hostilidad",
         "manual_reply",
+        "reprogramacion",
       ],
     }),
     lastInboundAt: timestamp("last_inbound_at"),
@@ -791,6 +795,14 @@ export const calendarSettings = pgTable(
     connector: text("connector").notNull().default("enlace-fijo"),
     /** Sala fija del conector `enlace-fijo`; null ⇒ citas sin link. */
     meetingLink: text("meeting_link"),
+    /**
+     * Título de la invitación (SUMMARY del .ics, enlaces de Google/Outlook y
+     * el evento real si el conector crea uno). Separado A PROPÓSITO del
+     * nombre de marca del CRM (`organization.name`, white-label) — ese puede
+     * ser un placeholder de setup; este es lo que ve un prospecto ajeno al
+     * CRM. `null` ⇒ usa `DEFAULT_APPOINTMENT_TITLE`.
+     */
+    appointmentTitle: text("appointment_title"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
@@ -850,6 +862,14 @@ export const booking = pgTable(
     linkPending: boolean("link_pending").notNull().default(false),
     /** Conversación del Laboratorio: jamás llama a un conector real. */
     isTest: boolean("is_test").notNull().default(false),
+    /**
+     * Auditoría 2026-09-17 — el cliente/modelo confirmó EXPLÍCITAMENTE que
+     * esta es una reunión aparte, no un duplicado de una cita activa que ya
+     * tenía el contacto. Sin esta marca, `booking_org_contact_single_active_uq`
+     * rechaza la segunda cita: el blindaje es que el default sea "no", nunca
+     * "sí" por inferencia del modelo.
+     */
+    additionalConfirmed: boolean("additional_confirmed").notNull().default(false),
     notes: text("notes"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
@@ -870,6 +890,70 @@ export const booking = pgTable(
       .where(
         sql`${t.status} in ('agendada','realizada') and ${t.isTest} = false`
       ),
+    /**
+     * Auditoría 2026-09-17 — el mismo cierre atómico, pero por CONTACTO en vez
+     * de por instante: a lo más una cita activa "normal" (sin
+     * `additional_confirmed`) por contacto. Sin esto, la validación en
+     * `createSessionBooking` deja una ventana entre leer y escribir igual que
+     * el hueco: dos `book_slot` casi simultáneos para el mismo contacto (o un
+     * reintento) podían colar una segunda cita en horarios DISTINTOS, que es
+     * justo el bug reportado (Max agendó jueves 09:00 y luego jueves 10:00
+     * para el mismo prospecto). Una cita adicional legítima existe: se marca
+     * `additional_confirmed = true` y queda FUERA de este índice a propósito.
+     */
+    uniqueIndex("booking_org_contact_single_active_uq")
+      .on(t.organizationId, t.contactId)
+      .where(
+        sql`${t.status} in ('agendada','realizada') and ${t.isTest} = false and ${t.additionalConfirmed} = false and ${t.contactId} is not null`
+      ),
+  ]
+);
+
+/**
+ * Auditoría 2026-09-17 — la solicitud de mover una cita, como estado
+ * PERSISTENTE ligado al contacto (y, cuando se conoce, a la cita original).
+ *
+ * Existe porque las instrucciones de prompt ("conserva la solicitud de
+ * cambio...") son una capa de comportamiento, no un control transaccional: el
+ * modelo puede cambiar de tema, alucinar que ya resolvió el pedido, o el
+ * traspaso a un humano puede fallar a medias. Esta fila sobrevive a todo eso —
+ * un cambio de tema, un handoff, un reinicio del turno — hasta que alguien
+ * (un reprogramar real o el operador) la resuelve explícitamente.
+ *
+ * Un índice único PARCIAL por (org, contacto) con status='pending' hace que
+ * registrar la MISMA solicitud dos veces sea idempotente: la segunda llamada
+ * no crea una fila nueva, encuentra la que ya existía.
+ */
+export const bookingChangeRequest = pgTable(
+  "booking_change_request",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contact.id, { onDelete: "cascade" }),
+    conversationId: text("conversation_id").references(() => conversation.id, {
+      onDelete: "set null",
+    }),
+    /** La cita que se quiere mover, cuando se pudo identificar con certeza. */
+    originalBookingId: text("original_booking_id").references(() => booking.id, {
+      onDelete: "set null",
+    }),
+    status: text("status", { enum: ["pending", "resolved", "cancelled"] })
+      .notNull()
+      .default("pending"),
+    /** Resumen breve, tomado literalmente de lo que pidió el cliente. */
+    note: text("note"),
+    requestedAt: timestamp("requested_at").notNull().defaultNow(),
+    resolvedAt: timestamp("resolved_at"),
+  },
+  (t) => [
+    index("booking_change_request_contact_idx").on(t.organizationId, t.contactId),
+    uniqueIndex("booking_change_request_pending_uq")
+      .on(t.organizationId, t.contactId)
+      .where(sql`${t.status} = 'pending'`),
   ]
 );
 

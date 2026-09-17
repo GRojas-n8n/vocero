@@ -46,6 +46,7 @@ const putSchema = z.object({
     })
     .optional(),
   meetingLink: z.string().nullish(),
+  appointmentTitle: z.string().max(200).nullish(),
 });
 
 /**

@@ -1,0 +1,1 @@
+ALTER TABLE "calendar_settings" ADD COLUMN "appointment_title" text;

@@ -52,6 +52,25 @@ const agendaActions = [
      * motivo para esa cita — nunca se rellena con un texto genérico.
      */
     reason: z.string().trim().min(1).max(200).optional(),
+    /**
+     * Auditoría 2026-09-17 — SOLO true cuando el cliente pidió, de forma
+     * clara y aparte, una reunión DISTINTA a una cita activa que ya tiene (no
+     * moverla, no la misma: otra). Sin esto en true, el servidor bloquea solo
+     * una segunda cita para el mismo contacto — no basta con que tú lo
+     * infieras de la conversación; si lo marcas, `reason` es OBLIGATORIO y
+     * debe explicar por qué es aparte.
+     */
+    confirmAdditional: z.boolean().optional(),
+  }),
+  z.object({
+    action: z.literal("request_reschedule"),
+    reply: z.string().optional(),
+    /**
+     * Auditoría 2026-09-17 — resumen breve de qué cambio pidió el cliente,
+     * tomado literalmente de la conversación (ej. "mover jueves 10am a
+     * viernes"). Queda como constancia de la solicitud.
+     */
+    note: z.string().trim().min(3).max(200).optional(),
   }),
 ] as const;
 
@@ -88,7 +107,8 @@ export function degradeAction(action: AgentActionType): AgentActionType {
   if (
     action.action === "move_stage" ||
     action.action === "offer_slots" ||
-    action.action === "book_slot"
+    action.action === "book_slot" ||
+    action.action === "request_reschedule"
   ) {
     return action.reply
       ? { action: "reply", text: action.reply }

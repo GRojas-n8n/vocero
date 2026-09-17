@@ -137,13 +137,21 @@ vi.mock("@/lib/db", () => ({
     lead: { organizationId: "organizationId", contactId: "contactId" },
     pipelineStage: { organizationId: "organizationId" },
     offeredSlot: {},
+    bookingChangeRequest: {
+      organizationId: "organizationId",
+      contactId: "contactId",
+      status: "status",
+    },
   },
 }));
 
 function primeLookups() {
-  // 1) la conversación, 2) el nombre del contacto, 3) el lead
+  // 1) la conversación, 2) el nombre del contacto, 3) sin cambio pendiente,
+  // 4) sin cita activa previa, 5) el lead
   selectRows.push([{ contactId: "ct_1", isTest: false }]);
   selectRows.push([{ name: "Ana" }]);
+  selectRows.push([]);
+  selectRows.push([]);
   selectRows.push([{ id: "ld_1" }]);
 }
 

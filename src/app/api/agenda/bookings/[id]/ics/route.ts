@@ -35,6 +35,7 @@ export async function GET(_req: Request, ctx: Params) {
     location: booking.meetingLink || booking.connectorLabel,
     organizerName: booking.orgName || undefined,
     status: cancelled ? "CANCELLED" : "CONFIRMED",
+    sequence: Math.floor(booking.updatedAt.getTime() / 1000),
   });
 
   return new Response(ics, {

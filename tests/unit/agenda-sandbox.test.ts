@@ -108,6 +108,11 @@ vi.mock("@/lib/db", () => ({
     lead: { organizationId: "organizationId", contactId: "contactId" },
     pipelineStage: { organizationId: "organizationId" },
     offeredSlot: {},
+    bookingChangeRequest: {
+      organizationId: "organizationId",
+      contactId: "contactId",
+      status: "status",
+    },
   },
 }));
 
@@ -142,6 +147,8 @@ describe("una cita del Laboratorio jamás llega al proveedor", () => {
     const { createSessionBooking } = await import("@/server/agenda/service");
     selectRows.push([{ contactId: "ct_1", isTest: true }]); // la conversación
     selectRows.push([{ name: "Persona simulada" }]); // el contacto
+    selectRows.push([]); // sin cambio de horario pendiente
+    selectRows.push([]); // sin cita activa previa
     selectRows.push([]); // sin lead
 
     const result = await createSessionBooking({
@@ -187,6 +194,8 @@ describe("una cita del Laboratorio jamás llega al proveedor", () => {
     const { createSessionBooking } = await import("@/server/agenda/service");
     selectRows.push([{ contactId: "ct_1", isTest: false }]);
     selectRows.push([{ name: "Cliente real" }]);
+    selectRows.push([]); // sin cambio de horario pendiente
+    selectRows.push([]); // sin cita activa previa
     selectRows.push([]);
 
     await createSessionBooking({

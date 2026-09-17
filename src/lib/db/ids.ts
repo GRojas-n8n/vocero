@@ -25,6 +25,7 @@ const prefixes = {
   calendarSettings: "cal",
   booking: "bk",
   offeredSlot: "ofs",
+  bookingChangeRequest: "bcr",
   zoomCredentials: "zcred",
   googleCredentials: "gcred",
   // 016 — atribución de anuncios

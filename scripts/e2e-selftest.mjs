@@ -1199,7 +1199,12 @@ async function agendaChecks() {
   );
 
   console.log("\n== 015: las dos garantías (US3) ==");
-  const LEAD_A = "5214627015001";
+  // Auditoría 2026-09-17 — el número lleva el RUN: con el blindaje nuevo
+  // contra una segunda cita por contacto, reusar el MISMO teléfono fijo entre
+  // corridas de este guion (contra una base de datos persistente) haría que
+  // la segunda corrida encontrara al contacto de la corrida anterior YA con
+  // una cita activa, y el 201 esperado se volvería un 409 legítimo.
+  const LEAD_A = `52146${RUN}01`;
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
@@ -1210,7 +1215,7 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.015.a.${RUN}.1`,
     }),
   });
-  const LEAD_B = "5214627015002";
+  const LEAD_B = `52146${RUN}02`;
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
@@ -1224,8 +1229,12 @@ async function agendaChecks() {
   await sleep(1500);
 
   const convsAgenda = (await api("/api/conversations")).json?.conversations ?? [];
-  const convA = convsAgenda.find((c) => c.contact.phone === "524627015001");
-  const convB = convsAgenda.find((c) => c.contact.phone === "524627015002");
+  const convA = convsAgenda.find(
+    (c) => c.contact.phone === LEAD_A.replace(/^521/, "52")
+  );
+  const convB = convsAgenda.find(
+    (c) => c.contact.phone === LEAD_B.replace(/^521/, "52")
+  );
   ok("dos conversaciones de prueba listas", Boolean(convA && convB));
   if (!convA || !convB) return;
 
@@ -1407,6 +1416,17 @@ async function agendaChecks() {
       conAlternativa.res.status === 201,
       `status=${conAlternativa.res.status}`
     );
+    // Auditoría 2026-09-17 — se cancela: el contacto de B solo puede tener
+    // UNA cita activa "normal" a la vez, y más abajo (conector Zoom) este
+    // mismo contacto agenda otra para probar la entrega del proveedor. Sin
+    // cancelar esta primero, esa segunda quedaría bloqueada por el blindaje
+    // nuevo — que es justo lo que se espera si NO se cancela.
+    if (conAlternativa.json?.bookingId) {
+      await api(`/api/bookings/${conAlternativa.json.bookingId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ action: "cancel" }),
+      });
+    }
   } else {
     ok("el 409 trajo alternativas frescas", false, "lista vacía");
   }
@@ -1449,7 +1469,10 @@ async function agendaChecks() {
     method: "PUT",
     body: JSON.stringify({ enabled: true }),
   });
-  const LEAD_MAX = "5214627015004";
+  // Auditoría 2026-09-17 — mismo motivo que LEAD_A/LEAD_B: con el RUN en el
+  // teléfono, cada corrida agenda con un contacto NUEVO y el blindaje contra
+  // una segunda cita no confunde una corrida anterior con esta.
+  const LEAD_MAX = `52146${RUN}04`;
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
@@ -1488,6 +1511,125 @@ async function agendaChecks() {
     diasMax.size > 1,
     JSON.stringify(lineasMax)
   );
+
+  console.log(
+    "\n== Auditoría 2026-09-17: el blindaje contra una SEGUNDA cita para el mismo contacto =="
+  );
+  // Bug reportado: un prospecto pidió mover su cita del jueves al viernes, Max
+  // derivó esa petición, pero después — hablando de otra cosa — agendó OTRA
+  // cita para el mismo jueves. El blindaje tiene que vivir en el SERVIDOR: las
+  // instrucciones de prompt son una capa de comportamiento, no un control
+  // transaccional, así que este guion reproduce justo el camino que las
+  // saltaría (el modelo volviendo a llamar book_slot) y afirma que el
+  // servidor, no el modelo, es quien lo detiene.
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_MAX,
+      name: `Lead agenda Max ${RUN}`,
+      text: "sí, agenda el primero",
+      waMessageId: `wamid.e2e.015.max.${RUN}.2`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  const convsMax1 = (await api("/api/conversations")).json?.conversations ?? [];
+  const convMax = convsMax1.find((c) => c.contact.phone === LEAD_MAX_NORM);
+  ok("la conversación de Max quedó localizable", Boolean(convMax));
+
+  const bookingsTrasMax1 = (await api("/api/bookings")).json?.bookings ?? [];
+  const activasMax1 = convMax
+    ? bookingsTrasMax1.filter(
+        (b) =>
+          b.contact?.id === convMax.contact.id &&
+          (b.status === "agendada" || b.status === "realizada")
+      )
+    : [];
+  ok(
+    "Max agendó UNA cita real para el prospecto",
+    activasMax1.length === 1,
+    JSON.stringify(activasMax1.map((b) => b.id))
+  );
+
+  // El prospecto pide MOVER esa cita: se registra el cambio pendiente y se
+  // deriva a una persona — nunca se agenda otra vez por su cuenta.
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_MAX,
+      name: `Lead agenda Max ${RUN}`,
+      text: "quiero mover mi cita a otro día",
+      waMessageId: `wamid.e2e.015.max.${RUN}.3`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  const convMaxTrasPedido = (
+    (await api("/api/conversations")).json?.conversations ?? []
+  ).find((c) => c.id === convMax?.id);
+  ok(
+    "pedir mover la cita deriva a una persona (handoff), NO la agenda de nuevo",
+    convMaxTrasPedido?.handoffReason === "reprogramacion",
+    JSON.stringify(convMaxTrasPedido)
+  );
+
+  // El dueño "atiende" el chat y reactiva la IA — como pasa en producción
+  // cuando el operador contesta y la conversación sigue por otro tema.
+  await api(`/api/conversations/${convMax.id}`, {
+    method: "PATCH",
+    body: JSON.stringify({ reactivate: true }),
+  });
+
+  // El prospecto sigue hablando y, en algún punto (un bug del modelo, una
+  // respuesta ambigua — exactamente lo que se reportó), Max vuelve a intentar
+  // agendar. El blindaje del SERVIDOR es lo único que no debe permitir una
+  // segunda cita mientras el cambio de horario sigue pendiente.
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_MAX,
+      name: `Lead agenda Max ${RUN}`,
+      text: "quiero agendar una cita",
+      waMessageId: `wamid.e2e.015.max.${RUN}.4`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_MAX,
+      name: `Lead agenda Max ${RUN}`,
+      text: "sí, agenda el primero",
+      waMessageId: `wamid.e2e.015.max.${RUN}.5`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  const bookingsTrasMax2 = (await api("/api/bookings")).json?.bookings ?? [];
+  const activasMax2 = bookingsTrasMax2.filter(
+    (b) =>
+      b.contact?.id === convMax?.contact.id &&
+      (b.status === "agendada" || b.status === "realizada")
+  );
+  ok(
+    "el blindaje bloquea la segunda cita: SIGUE habiendo solo UNA activa para el contacto",
+    activasMax2.length === 1,
+    `activas=${activasMax2.length} ids=${JSON.stringify(activasMax2.map((b) => b.id))}`
+  );
+
+  const outboxMax2 = (await api("/api/dev/wa-mock/outbox")).json?.outbox ?? [];
+  const ultimoMax = outboxMax2.filter((o) => o.to === LEAD_MAX_NORM).pop();
+  ok(
+    "el mensaje al prospecto avisa de la cita existente, NUNCA confirma una nueva",
+    typeof ultimoMax?.body?.text?.body === "string" &&
+      !/¡listo!/i.test(ultimoMax.body.text.body),
+    JSON.stringify(ultimoMax)
+  );
+
   // Se apaga de vuelta: el resto del guion asume el agente in-process OFF.
   await api("/api/agent/profile", {
     method: "PUT",
@@ -1659,9 +1801,12 @@ async function agendaChecks() {
 
       const estado = await (await fetch(`${BASE}/api/dev/zoom-mock/_state`)).json();
       ok(
-        "el proveedor recibió la reunión con su tema y su hora",
+        // Mismo título configurado en Ajustes → Agenda que ve el .ics y los
+        // enlaces de Google/Outlook (`bookingCopy`), NUNCA el nombre de la
+        // organización (placeholder de setup) ni el del contacto.
+        "el proveedor recibió la reunión con el título configurado y su hora",
         estado.meetings?.length === 1 &&
-          estado.meetings[0].topic.startsWith("Cita —"),
+          estado.meetings[0].topic === "Llamada inicial | Más Impulso Digital",
         JSON.stringify(estado.meetings)
       );
 

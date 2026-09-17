@@ -23,6 +23,14 @@ export type WeeklyHours = Partial<Record<WeekdayKey, Interval[]>>;
 
 export const DEFAULT_TIMEZONE = "America/Mexico_City";
 
+/**
+ * Título de invitación de esta instancia cuando el negocio no configuró el
+ * suyo. Separado a propósito del nombre de marca del CRM (white-label): una
+ * cosa es cómo se llama el panel, otra el texto que ve un prospecto ajeno al
+ * CRM en su calendario.
+ */
+export const DEFAULT_APPOINTMENT_TITLE = "Llamada inicial | Más Impulso Digital";
+
 /** L-V 09:00-18:00 — se ajusta en Ajustes → Agenda. */
 export const DEFAULT_WEEKLY_HOURS: WeeklyHours = {
   mon: [{ start: "09:00", end: "18:00" }],
@@ -43,6 +51,8 @@ export type CalendarSettings = {
   connector: ConnectorId;
   /** Sala fija del conector `enlace-fijo`; null ⇒ citas sin link. */
   meetingLink: string | null;
+  /** Ya resuelto: nunca vacío — cae a `DEFAULT_APPOINTMENT_TITLE`. */
+  appointmentTitle: string;
 };
 
 /** Lo que ve una instancia recién encendida: útil sin configurar nada. */
@@ -55,6 +65,7 @@ export const DEFAULT_CALENDAR_SETTINGS: CalendarSettings = {
   timezone: DEFAULT_TIMEZONE,
   connector: DEFAULT_CONNECTOR,
   meetingLink: null,
+  appointmentTitle: DEFAULT_APPOINTMENT_TITLE,
 };
 
 export const LIMITS = {
@@ -94,10 +105,12 @@ export class CalendarSettingsError extends Error {
  * comprobación que no ocurre.
  */
 export type CalendarSettingsInput = Partial<
-  Omit<CalendarSettings, "weeklyHours" | "connector">
+  Omit<CalendarSettings, "weeklyHours" | "connector" | "appointmentTitle">
 > & {
   weeklyHours?: unknown;
   connector?: string;
+  /** `null`/vacío ⇒ vuelve a `DEFAULT_APPOINTMENT_TITLE`. */
+  appointmentTitle?: string | null;
 };
 
 /** Fila cruda → `CalendarSettings`; misma normalización que `getSettings`. */
@@ -113,6 +126,7 @@ function mapRow(row: typeof schema.calendarSettings.$inferSelect): CalendarSetti
     // puede dejar la agenda inservible: se degrada al soberano.
     connector: isConnectorId(row.connector) ? row.connector : DEFAULT_CONNECTOR,
     meetingLink: row.meetingLink,
+    appointmentTitle: row.appointmentTitle?.trim() || DEFAULT_APPOINTMENT_TITLE,
   };
 }
 
@@ -136,6 +150,11 @@ export async function upsertSettings(
       .for("update")
       .limit(1);
     const current = rows[0] ? mapRow(rows[0]) : DEFAULT_CALENDAR_SETTINGS;
+    // Crudo (nullable), NO el ya resuelto de `current`: si guardáramos el
+    // default resuelto en cada save, un negocio que nunca tocó el título
+    // quedaría congelado en el default del día de su primer guardado de
+    // horario — y un cambio futuro al default dejaría de alcanzarlo.
+    const currentTitleRaw = rows[0]?.appointmentTitle ?? null;
 
     const timezone = input.timezone ?? current.timezone;
     // Una zona desconocida rompería el motor entero: se rechaza al guardar.
@@ -147,6 +166,12 @@ export async function upsertSettings(
     if (!isConnectorId(connector)) {
       throw new CalendarSettingsError(`Conector desconocido: ${connector}`);
     }
+
+    const appointmentTitleRaw = normalizeTitle(
+      input.appointmentTitle !== undefined
+        ? input.appointmentTitle
+        : currentTitleRaw
+    );
 
     const next: CalendarSettings = {
       weeklyHours: normalizeWeeklyHours(
@@ -177,6 +202,7 @@ export async function upsertSettings(
       meetingLink: normalizeLink(
         input.meetingLink !== undefined ? input.meetingLink : current.meetingLink
       ),
+      appointmentTitle: appointmentTitleRaw || DEFAULT_APPOINTMENT_TITLE,
     };
 
     const values = {
@@ -188,6 +214,7 @@ export async function upsertSettings(
       timezone: next.timezone,
       connector: next.connector,
       meetingLink: next.meetingLink,
+      appointmentTitle: appointmentTitleRaw,
     };
     await tx
       .insert(schema.calendarSettings)
@@ -228,6 +255,12 @@ export function normalizeWeeklyHours(input: unknown): WeeklyHours {
 /** Cadena vacía o espacios ⇒ null (el campo es opcional de verdad). */
 function normalizeLink(link: string | null | undefined): string | null {
   const trimmed = (link ?? "").trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+/** Cadena vacía o espacios ⇒ null (sin personalizar ⇒ cae a `DEFAULT_APPOINTMENT_TITLE`). */
+function normalizeTitle(title: string | null | undefined): string | null {
+  const trimmed = (title ?? "").trim();
   return trimmed.length > 0 ? trimmed : null;
 }
 

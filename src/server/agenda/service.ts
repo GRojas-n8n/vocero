@@ -24,6 +24,10 @@ import {
 import { ConnectorError } from "@/server/agenda/connectors/types";
 import { moveLeadToStage } from "@/server/leads/stage-history";
 import { publish } from "@/server/events/bus";
+import {
+  getPendingRescheduleRequest,
+  resolvePendingRescheduleRequests,
+} from "@/server/agenda/reschedule-requests";
 
 /**
  * 015 — Ciclo de vida de la cita y las dos reglas INNEGOCIABLES:
@@ -45,7 +49,19 @@ export type BookingErrorCode =
   | "slot_taken"
   | "slot_not_offered"
   | "not_found"
-  | "invalid";
+  | "invalid"
+  /**
+   * Auditoría 2026-09-17 — el contacto ya tiene una cita activa futura y
+   * nadie confirmó EXPLÍCITAMENTE que esta es una reunión aparte.
+   */
+  | "existing_booking"
+  /**
+   * Auditoría 2026-09-17 — hay una solicitud de mover la cita todavía
+   * pendiente para este contacto (`booking_change_request`). Mientras siga
+   * abierta, no se crea ninguna cita nueva sin confirmación explícita: crear
+   * una haría exactamente lo que se reportó como bug (dos citas activas).
+   */
+  | "reschedule_pending";
 
 export class BookingError extends Error {
   code: BookingErrorCode;
@@ -55,16 +71,24 @@ export class BookingError extends Error {
    * es lo que sí se había ofrecido.
    */
   slots: OfferedSlot[];
+  /**
+   * En `existing_booking`/`reschedule_pending`: la cita (o el pedido) que
+   * bloqueó la creación, para que quien conduce la conversación pueda
+   * nombrarla en vez de responder en genérico.
+   */
+  existing: { bookingId: string; label: string } | null;
 
   constructor(
     code: BookingErrorCode,
     message: string,
-    slots: OfferedSlot[] = []
+    slots: OfferedSlot[] = [],
+    existing: { bookingId: string; label: string } | null = null
   ) {
     super(message);
     this.name = "BookingError";
     this.code = code;
     this.slots = slots;
+    this.existing = existing;
   }
 }
 
@@ -95,6 +119,14 @@ export async function createSessionBooking(input: {
    * que reserva sin oferta previa.
    */
   requireOffer: boolean;
+  /**
+   * Auditoría 2026-09-17 — true SOLO cuando quien conduce la conversación
+   * confirmó de forma EXPLÍCITA (nunca inferida del texto) que esta cita es
+   * una reunión APARTE de cualquier cita activa que el contacto ya tenga.
+   * Con esto en falso (el default) una segunda cita activa para el mismo
+   * contacto se bloquea, sin importar el instante que se pida.
+   */
+  allowAdditional?: boolean;
   now?: Date;
 }): Promise<BookingResult> {
   const db = getDb();
@@ -152,6 +184,57 @@ export async function createSessionBooking(input: {
     }
   }
 
+  // REGLA 3 (auditoría 2026-09-17): no crear en silencio una SEGUNDA cita
+  // activa para un contacto que ya tiene una, o que tiene un cambio de
+  // horario pendiente. `allowAdditional` es la única salida, y exige
+  // constancia escrita (`notes`) — no basta con que el llamador lo pida sin
+  // dejar dicho POR QUÉ, porque eso es indistinguible de inferirlo solo.
+  if (input.allowAdditional) {
+    if (!input.notes?.trim()) {
+      throw new BookingError(
+        "invalid",
+        "Una cita adicional confirmada necesita decir, en notas, por qué es una reunión aparte"
+      );
+    }
+  } else {
+    const pendingChange = await getPendingRescheduleRequest(
+      input.organizationId,
+      contactId
+    );
+    if (pendingChange) {
+      const originalLabel = pendingChange.originalBookingId
+        ? await getBookingLabel(
+            input.organizationId,
+            pendingChange.originalBookingId,
+            settings
+          )
+        : null;
+      throw new BookingError(
+        "reschedule_pending",
+        "Hay un cambio de horario pendiente para este contacto",
+        [],
+        {
+          bookingId: pendingChange.originalBookingId ?? "",
+          label: originalLabel ?? "su cita activa",
+        }
+      );
+    }
+    const active = await findActiveBooking(input.organizationId, contactId, {
+      now: input.now,
+    });
+    if (active) {
+      throw new BookingError(
+        "existing_booking",
+        "El contacto ya tiene una cita activa",
+        [],
+        {
+          bookingId: active.id,
+          label: labelInTz(active.scheduledAt.toISOString(), settings.timezone),
+        }
+      );
+    }
+  }
+
   // REGLA 2 (primera mitad): el hueco debe seguir libre AHORA.
   const slot = await findSlot(input.organizationId, input.startUtc, {
     now: input.now,
@@ -197,24 +280,49 @@ export async function createSessionBooking(input: {
         // el que le tocó y sigue hablando con él al moverse o cancelarse.
         connector: settings.connector,
         isTest,
+        additionalConfirmed: input.allowAdditional === true,
         notes: input.notes ?? null,
       })
       .returning();
     booking = inserted[0]!;
   } catch (err) {
-    // REGLA 2 (segunda mitad): la llave única cierra la carrera exacta. Dos
-    // confirmaciones simultáneas del mismo instante — la perdedora sale por
-    // aquí, sin cita creada.
-    if (isUniqueViolation(err)) {
+    const constraint = uniqueViolationConstraint(err);
+    if (constraint === null) throw err;
+
+    // REGLA 3 (segunda mitad): la carrera por CONTACTO. El pre-chequeo de
+    // arriba deja una ventana entre leer y escribir; esto la cierra en la
+    // base — dos `book_slot` casi simultáneos para el mismo contacto no
+    // pueden colar los dos, sin importar que pidan instantes distintos (el
+    // bug reportado: jueves 09:00 Y jueves 10:00 para el mismo prospecto).
+    if (constraint === "booking_org_contact_single_active_uq") {
+      const active = await findActiveBooking(input.organizationId, contactId, {
+        now: input.now,
+      });
       throw new BookingError(
-        "slot_taken",
-        "Ese horario acaba de ocuparse",
-        await refreshOffer(input.organizationId, input.conversationId, {
-          now: input.now,
-        })
+        "existing_booking",
+        "El contacto ya tiene una cita activa",
+        [],
+        active
+          ? {
+              bookingId: active.id,
+              label: labelInTz(active.scheduledAt.toISOString(), settings.timezone),
+            }
+          : null
       );
     }
-    throw err;
+
+    // REGLA 2 (segunda mitad): la llave única del HUECO cierra la carrera
+    // exacta. Dos confirmaciones simultáneas del mismo instante — la
+    // perdedora sale por aquí, sin cita creada. Cualquier otro nombre de
+    // restricción (o uno que el driver de pruebas no informe) cae aquí
+    // también: `slot_taken` fue siempre el default de este choque.
+    throw new BookingError(
+      "slot_taken",
+      "Ese horario acaba de ocuparse",
+      await refreshOffer(input.organizationId, input.conversationId, {
+        now: input.now,
+      })
+    );
   }
 
   // La oferta cumplió su propósito.
@@ -334,6 +442,17 @@ export async function rescheduleBooking(input: {
       timezone: settings.timezone,
     });
   });
+
+  // Auditoría 2026-09-17 — un reprogramar REAL es el único desenlace que
+  // atiende de verdad un cambio pendiente: se resuelve aquí y en ningún otro
+  // lugar (nunca por inferencia del modelo ni porque cambió el tema).
+  if (next.contactId) {
+    await resolvePendingRescheduleRequests(input.organizationId, next.contactId).catch(
+      (err) => {
+        console.warn(`[agenda] no pude resolver el cambio pendiente: ${err}`);
+      }
+    );
+  }
 
   publish(input.organizationId, {
     type: "booking.updated",
@@ -526,15 +645,26 @@ async function deliverMeeting(
     // Si la cita YA tiene reunión, esto es un reintento: se vuelve a leer, no
     // se crea otra. Sin esta rama, reintentar el enlace de un evento de Google
     // dejaría al dueño con dos citas en su calendario.
+    // Mismo título que el .ics y los enlaces de Google/Outlook
+    // (`bookingCopy`, `public-view.ts`): un prospecto que compara su
+    // confirmación contra el evento real del dueño nunca ve dos nombres
+    // distintos para la misma cita. El nombre del contacto va en la
+    // descripción, no en el título — ahí sigue siendo útil para el dueño.
     const meeting =
       booking.externalRef && conn.refreshMeeting
         ? await conn.refreshMeeting(booking.externalRef)
         : await conn.createMeeting({
-            topic: contactName ? `Cita — ${contactName}` : "Cita",
+            topic: settings.appointmentTitle,
             startUtc: booking.scheduledAt.toISOString(),
             durationMinutes: booking.durationMinutes,
             timezone: settings.timezone,
-            notes: booking.notes ?? undefined,
+            notes:
+              [
+                contactName ? `Cita de ${contactName}.` : null,
+                booking.notes,
+              ]
+                .filter((v): v is string => Boolean(v))
+                .join("\n\n") || undefined,
           });
 
     return await persistDelivery(booking.id, {
@@ -741,15 +871,19 @@ async function advanceLeadStage(
 /** Citas que ocupan agenda de verdad. */
 export const ACTIVE_STATUSES = ["agendada", "realizada"] as const;
 
-/** ¿Hay alguna cita activa para este contacto? Lo usa el agente. */
-export async function hasActiveBooking(
+/**
+ * La cita activa (futura, `session`, no de prueba) de un contacto, si tiene
+ * una. Lo usa el blindaje de `createSessionBooking` — y quien conduzca la
+ * conversación, para nombrarla en vez de responder en genérico.
+ */
+export async function findActiveBooking(
   organizationId: string,
   contactId: string,
-  now = new Date()
-): Promise<boolean> {
+  opts: { now?: Date } = {}
+): Promise<BookingRow | null> {
   const db = getDb();
   const rows = await db
-    .select({ id: schema.booking.id })
+    .select()
     .from(schema.booking)
     .where(
       scoped(
@@ -758,25 +892,67 @@ export async function hasActiveBooking(
         and(
           eq(schema.booking.contactId, contactId),
           eq(schema.booking.kind, "session"),
+          eq(schema.booking.isTest, false),
           inArray(schema.booking.status, [...ACTIVE_STATUSES]),
-          gte(schema.booking.scheduledAt, now)
+          gte(schema.booking.scheduledAt, opts.now ?? new Date())
         )
       )
     )
+    .orderBy(asc(schema.booking.scheduledAt))
     .limit(1);
-  return rows.length > 0;
+  return rows[0] ?? null;
+}
+
+async function getBookingLabel(
+  organizationId: string,
+  bookingId: string,
+  settings: CalendarSettings
+): Promise<string | null> {
+  const db = getDb();
+  const rows = await db
+    .select({ scheduledAt: schema.booking.scheduledAt })
+    .from(schema.booking)
+    .where(
+      scoped(
+        schema.booking.organizationId,
+        organizationId,
+        eq(schema.booking.id, bookingId)
+      )
+    )
+    .limit(1);
+  const row = rows[0];
+  if (!row) return null;
+  return labelInTz(row.scheduledAt.toISOString(), settings.timezone);
 }
 
 /** 23505 = unique_violation de Postgres. */
 function isUniqueViolation(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  const code = (err as { code?: unknown }).code;
-  if (code === "23505") return true;
+  return uniqueViolationConstraint(err) !== null;
+}
+
+/**
+ * Nombre del índice/restricción único que chocó, o null si el error no es
+ * eso. Distinguir POR CUÁL índice importa desde la auditoría 2026-09-17: el
+ * mismo 23505 puede venir del choque de HUECO (`booking_org_active_slot_uq`,
+ * ya existía) o del choque de CONTACTO (`booking_org_contact_single_active_uq`,
+ * nuevo) — cada uno se traduce a un `BookingErrorCode` distinto.
+ */
+function uniqueViolationConstraint(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const direct = err as { code?: unknown; constraint?: unknown };
+  if (direct.code === "23505") return readConstraint(direct);
   // Drizzle envuelve el error del driver: el código real viaja en `cause`.
   const cause = (err as { cause?: unknown }).cause;
-  return (
+  if (
     typeof cause === "object" &&
     cause !== null &&
     (cause as { code?: unknown }).code === "23505"
-  );
+  ) {
+    return readConstraint(cause as { constraint?: unknown });
+  }
+  return null;
+}
+
+function readConstraint(obj: { constraint?: unknown }): string | null {
+  return typeof obj.constraint === "string" ? obj.constraint : "unknown";
 }

@@ -17,12 +17,16 @@ export type PublicBooking = {
   status: "agendada" | "realizada" | "no_show" | "cancelada";
   scheduledAt: Date;
   durationMinutes: number;
+  /** Para `SEQUENCE` del .ics — RFC 5545 §3.8.7.4, ver `lib/ics.ts`. */
+  updatedAt: Date;
   meetingLink: string | null;
   linkPending: boolean;
   connectorLabel: string | undefined;
   timezone: string;
   orgName: string;
   contactName: string;
+  /** Ya resuelto (`getSettings`): título de la invitación, nunca vacío. */
+  appointmentTitle: string;
 };
 
 export async function getPublicBooking(
@@ -36,6 +40,7 @@ export async function getPublicBooking(
       status: schema.booking.status,
       scheduledAt: schema.booking.scheduledAt,
       durationMinutes: schema.booking.durationMinutes,
+      updatedAt: schema.booking.updatedAt,
       meetingLink: schema.booking.meetingLink,
       linkPending: schema.booking.linkPending,
       connector: schema.booking.connector,
@@ -71,6 +76,7 @@ export async function getPublicBooking(
     status: booking.status,
     scheduledAt: booking.scheduledAt,
     durationMinutes: booking.durationMinutes,
+    updatedAt: booking.updatedAt,
     meetingLink: booking.meetingLink,
     linkPending: booking.linkPending,
     connectorLabel: booking.connector
@@ -79,17 +85,24 @@ export async function getPublicBooking(
     timezone: settings.timezone,
     orgName: orgRows[0]?.name?.trim() || "",
     contactName: contactRows[0]?.name?.trim() || "",
+    appointmentTitle: settings.appointmentTitle,
   };
 }
 
-/** Título y descripción — el mismo texto para el .ics y para la página. */
+/**
+ * Título y descripción — el mismo texto para el .ics, los enlaces de
+ * Google/Outlook y la página de confirmación.
+ *
+ * El título viene de `calendar_settings.appointment_title` (Ajustes →
+ * Agenda), NUNCA del nombre de la organización: ese es un dato interno del
+ * CRM (a veces un placeholder de setup) y no algo profesional para mostrarle
+ * a un prospecto en SU calendario.
+ */
 export function bookingCopy(booking: PublicBooking): {
   title: string;
   description: string;
 } {
-  const title = booking.orgName
-    ? `Cita con ${booking.orgName}`
-    : "Cita agendada";
+  const title = booking.appointmentTitle;
   const descriptionLines = [
     booking.contactName ? `Cita de ${booking.contactName}.` : null,
     booking.meetingLink ? `Enlace: ${booking.meetingLink}` : null,

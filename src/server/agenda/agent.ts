@@ -3,7 +3,12 @@ import { computeAvailability } from "@/server/agenda/availability";
 import { getSettings } from "@/server/agenda/settings";
 import { pickAcrossDays, spreadByDay } from "@/server/agenda/spread";
 import { replaceOffers } from "@/server/agenda/offers";
-import { BookingError, createSessionBooking } from "@/server/agenda/service";
+import {
+  BookingError,
+  createSessionBooking,
+  findActiveBooking,
+} from "@/server/agenda/service";
+import { requestReschedule } from "@/server/agenda/reschedule-requests";
 
 /**
  * 015 — Lo que el agente incluido puede hacer con la agenda.
@@ -22,11 +27,28 @@ const SHOWN = 3;
 /** Cuántos se guardan como reservables: el catálogo es más ancho que el menú. */
 const OFFERED = 12;
 
+/**
+ * Auditoría 2026-09-17 — el DESENLACE exacto del turno de agenda, para que
+ * quien llame (pipeline.ts, los tests) distinga sin ambigüedad "se agendó" de
+ * "ya había una cita", "hay un cambio pendiente", "el hueco se ocupó" o
+ * "falló": nunca disfrazar un bloqueo o un error de confirmación.
+ */
+export type AgendaTurnStatus =
+  | "booked"
+  | "offered"
+  | "no_availability"
+  | "existing_booking"
+  | "reschedule_pending"
+  | "slot_taken"
+  | "not_offered"
+  | "error";
+
 export type AgendaTurn = {
   /** Lo que hay que enviarle al cliente. */
   text: string;
   /** false ⇒ el motor no pudo; el turno sigue, sin agendar. */
   ok: boolean;
+  status: AgendaTurnStatus;
 };
 
 export async function offerSlots(input: {
@@ -51,6 +73,7 @@ export async function offerSlots(input: {
     // Agenda llena no es un error: es una respuesta que el cliente entiende.
     return {
       ok: false,
+      status: "no_availability",
       text:
         input.intro?.trim() ||
         "Por ahora no me quedan horarios libres. Déjame confirmarlo con el equipo y te aviso.",
@@ -71,7 +94,7 @@ export async function offerSlots(input: {
   const shown = pickAcrossDays(spread, SHOWN);
   const lista = shown.map((s) => `• ${s.dayLabel} a las ${s.time}`).join("\n");
   const intro = input.intro?.trim() || "Tengo estos horarios disponibles:";
-  return { ok: true, text: `${intro}\n${lista}` };
+  return { ok: true, status: "offered", text: `${intro}\n${lista}` };
 }
 
 export async function bookSlot(input: {
@@ -81,6 +104,12 @@ export async function bookSlot(input: {
   confirmation?: string;
   /** Fase 5 — motivo breve tomado de la conversación; ver actions.ts. */
   reason?: string;
+  /**
+   * Auditoría 2026-09-17 — true SOLO si el modelo marcó EXPLÍCITAMENTE que
+   * esto es una reunión aparte de cualquier cita activa del contacto (ver
+   * `actions.ts`). Sin esto, una segunda cita activa se bloquea sola.
+   */
+  confirmAdditional?: boolean;
 }): Promise<AgendaTurn> {
   try {
     const result = await createSessionBooking({
@@ -90,6 +119,7 @@ export async function bookSlot(input: {
       source: "ai",
       requireOffer: true,
       notes: input.reason?.trim() || null,
+      allowAdditional: input.confirmAdditional === true,
     });
 
     const base =
@@ -103,6 +133,7 @@ export async function bookSlot(input: {
     if (result.meetingLink) {
       return {
         ok: true,
+        status: "booked",
         text: `${base}\nEnlace: ${result.meetingLink}\n${guardar}`,
       };
     }
@@ -110,12 +141,37 @@ export async function bookSlot(input: {
       // La cita existe; el enlace no. No se promete lo que no se tiene.
       return {
         ok: true,
+        status: "booked",
         text: `${base}\nEn un momento te comparto el enlace por aquí.\n${guardar}`,
       };
     }
-    return { ok: true, text: `${base}\n${guardar}` };
+    return { ok: true, status: "booked", text: `${base}\n${guardar}` };
   } catch (err) {
     if (!(err instanceof BookingError)) throw err;
+
+    // Auditoría 2026-09-17 — el contacto ya tiene una cita activa: se dice
+    // explícito, con la fecha real, y NUNCA se confirma nada nuevo. El
+    // cliente decide si quiere moverla (request_reschedule) o si de verdad es
+    // otra reunión (confirmAdditional).
+    if (err.code === "existing_booking") {
+      const cuando = err.existing?.label ?? "una fecha que ya tienes agendada";
+      return {
+        ok: false,
+        status: "existing_booking",
+        text: `Veo que ya tienes una cita agendada para ${cuando}. Cuéntame si quieres moverla o si esta es una reunión aparte.`,
+      };
+    }
+
+    // Auditoría 2026-09-17 — hay un cambio de horario pendiente: no se agenda
+    // nada nuevo hasta que ese pedido se resuelva de verdad (reprogramar
+    // real), sin importar de qué esté hablando la conversación ahora.
+    if (err.code === "reschedule_pending") {
+      return {
+        ok: false,
+        status: "reschedule_pending",
+        text: "Ya tomé nota del cambio de horario que pediste; en cuanto el equipo lo confirme te aviso por aquí.",
+      };
+    }
 
     // Se ocupó o el modelo inventó la hora: en ambos casos se re-ofrece con
     // datos reales en vez de discutir con el cliente.
@@ -128,11 +184,52 @@ export async function bookSlot(input: {
         err.code === "slot_taken"
           ? "Se me acaba de ocupar ese horario, ¡perdón!"
           : "Déjame confirmarte los horarios que tengo:";
-      return { ok: false, text: `${disculpa}\n${lista}` };
+      return {
+        ok: false,
+        status: err.code === "slot_taken" ? "slot_taken" : "not_offered",
+        text: `${disculpa}\n${lista}`,
+      };
     }
     return {
       ok: false,
+      status: "error",
       text: "No pude agendarlo en este momento. Lo reviso con el equipo y te confirmo.",
     };
   }
+}
+
+/**
+ * Auditoría 2026-09-17 — registra que el cliente pidió mover una cita, como
+ * estado PERSISTENTE (`booking_change_request`), y lo devuelve para que
+ * `pipeline.ts` derive a un humano: el agente incluido no tiene una
+ * herramienta de reprogramación segura, así que este pedido NUNCA agenda
+ * nada por su cuenta — solo dice que ya quedó anotado.
+ *
+ * Best-effort en la persistencia (igual que el resto de los efectos
+ * secundarios de este módulo): si falla, el turno igual deriva a un humano —
+ * quedarse callado o, peor, seguir agendando, sería el desenlace real malo.
+ */
+export async function recordRescheduleRequest(input: {
+  organizationId: string;
+  conversationId: string;
+  contactId: string;
+  note?: string;
+}): Promise<AgendaTurn> {
+  try {
+    const active = await findActiveBooking(input.organizationId, input.contactId);
+    await requestReschedule({
+      organizationId: input.organizationId,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      originalBookingId: active?.id ?? null,
+      note: input.note,
+    });
+  } catch (err) {
+    console.error(`[agenda] no pude registrar la solicitud de cambio: ${err}`);
+  }
+  return {
+    ok: true,
+    status: "reschedule_pending",
+    text: "Voy a confirmar el cambio de horario con el equipo y te aviso por aquí.",
+  };
 }

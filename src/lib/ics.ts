@@ -46,6 +46,15 @@ export function buildEventIcs(input: {
    * cita cancelada se veía idéntico a uno confirmado.
    */
   status?: "CONFIRMED" | "CANCELLED";
+  /**
+   * RFC 5545 §3.8.7.4: un cliente que ya guardó este UID (Outlook de
+   * escritorio, Apple Calendar) solo aplica la nueva versión si SEQUENCE
+   * subió — con el mismo valor de siempre, una reprogramación o cancelación
+   * puede quedarse como un evento fantasma sin actualizar. Se pasa el instante
+   * de la última modificación de la cita en epoch-segundos: crece solo y sin
+   * necesitar una columna nueva.
+   */
+  sequence?: number;
 }): string {
   const start = new Date(input.startUtc);
   const end = new Date(start.getTime() + input.durationMinutes * 60_000);
@@ -76,6 +85,7 @@ export function buildEventIcs(input: {
       `ORGANIZER;CN=${escapeText(input.organizerName)}:MAILTO:noreply@noreply.invalid`
     );
   }
+  lines.push(`SEQUENCE:${Math.max(0, Math.trunc(input.sequence ?? 0))}`);
   lines.push(`STATUS:${status}`, "END:VEVENT", "END:VCALENDAR");
 
   return lines.map(foldLine).join("\r\n") + "\r\n";

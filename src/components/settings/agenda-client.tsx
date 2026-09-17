@@ -37,6 +37,7 @@ type Settings = {
   timezone: string;
   connector: ConnectorId;
   meetingLink: string | null;
+  appointmentTitle: string;
 };
 
 const DAYS: { key: DayKey; label: string }[] = [
@@ -143,6 +144,9 @@ export function AgendaClient() {
         connector: settings.connector,
         meetingLink: settings.meetingLink?.trim()
           ? settings.meetingLink.trim()
+          : null,
+        appointmentTitle: settings.appointmentTitle?.trim()
+          ? settings.appointmentTitle.trim()
           : null,
       }),
     }).catch(() => null);
@@ -295,6 +299,25 @@ export function AgendaClient() {
               placeholder="America/Mexico_City"
             />
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Título de la invitación</CardTitle>
+          <CardDescription>
+            Lo que ve el prospecto en SU calendario (.ics, botones de Google y
+            Outlook, y el evento real si el conector crea uno). Es distinto
+            del nombre del CRM en tu barra lateral — aquí puedes poner algo
+            profesional aunque ese nombre todavía sea un placeholder de setup.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Input
+            value={settings.appointmentTitle}
+            onChange={(e) => patch({ appointmentTitle: e.target.value })}
+            placeholder="Llamada inicial | Tu negocio"
+          />
         </CardContent>
       </Card>
 

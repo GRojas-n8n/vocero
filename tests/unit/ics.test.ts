@@ -5,7 +5,7 @@ const BASE = {
   uid: "bk_123@vocero",
   startUtc: "2026-08-05T15:00:00.000Z",
   durationMinutes: 30,
-  summary: "Cita con Más Impulso",
+  summary: "Llamada inicial | Más Impulso Digital",
 };
 
 describe("buildEventIcs", () => {
@@ -44,5 +44,20 @@ describe("buildEventIcs", () => {
     expect(ics).toContain(
       "DESCRIPTION:Trae tu\\, identificación\\; y llega puntual\\na la cita."
     );
+  });
+
+  /**
+   * RFC 5545 §3.8.7.4 — sin `SEQUENCE` creciendo, un cliente que ya guardó
+   * este UID (Outlook de escritorio, Apple Calendar) puede ignorar una
+   * reprogramación o cancelación por "versión no más nueva".
+   */
+  it("sin `sequence` explícito, escribe SEQUENCE:0", () => {
+    const ics = buildEventIcs(BASE);
+    expect(ics).toContain("SEQUENCE:0");
+  });
+
+  it("propaga `sequence` para que una actualización no se vea como la misma versión", () => {
+    const ics = buildEventIcs({ ...BASE, sequence: 42 });
+    expect(ics).toContain("SEQUENCE:42");
   });
 });

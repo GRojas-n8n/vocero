@@ -91,6 +91,17 @@ export function aiMockCompletion(messages: InMessage[]): string {
     });
   }
 
+  // Auditoría 2026-09-17 — pedir MOVER una cita existente nunca debe caer en
+  // el camino de offer_slots/book_slot (ambos coinciden con "cita"/"agendar"
+  // más abajo): se revisa primero y determinista.
+  if (/\bmover\b|reprogramar|cambiar (mi|la|de) (cita|horario)/.test(text)) {
+    return JSON.stringify({
+      action: "request_reschedule",
+      note: lastUser.slice(0, 120),
+      reply: "Voy a confirmar el cambio con el equipo y te aviso por aquí.",
+    });
+  }
+
   // 015 — Agenda: dispara el mismo camino que un lead real, para poder
   // probar de punta a punta lo que ve el prospecto (no solo /api/bot/*, que
   // ya trae su propio catálogo — esto ejercita `offerSlots`/`bookSlot`, el
