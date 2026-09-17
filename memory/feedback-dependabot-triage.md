@@ -62,6 +62,34 @@ Verificado con `pnpm typecheck/lint/test` (496/496) y `pnpm build` completo
 postcss/tailwind pese a forzar la copia que trae embebida `next@15.5.25`).
 Cierra 6 de las 19 alertas (4 altas, 2 medias) sin cambiar código de la app.
 
+**Cierre 2026-09-17 (mismo día, pase aparte)** — el bump mayor que se había
+diferido, ya con el resto resuelto y sin apuro: `vitest` 3.2.7→4.1.11 y
+`vite` (antes solo transitivo) declarado como devDependency directa en
+`^6.4.3` porque Vitest 4 lo exige como *peer*. Antes de tocarlo se leyó la
+guía real de migración (`v4.vitest.dev/guide/migration`, no solo el
+resumen): el cambio de mocking que suena más grave — "las arrow functions
+truenan" — solo aplica a **clases mockeadas e instanciadas con `new`**, un
+patrón que este repo no usa (todos los `vi.fn()` de los tests son funciones
+planas); se confirmó además por grep que ninguna API renombrada/eliminada
+(`maxThreads`, `poolOptions`, `deps.external`, `test(name, fn, options)`,
+reporters custom, config de `coverage`) aparece en `vitest.config.ts` ni en
+ningún test. Verificado con la suite completa sin tocar un solo test
+(496/496 verdes) y `pnpm build` limpio.
+
+**Estado final confirmado** (`gh api .../dependabot/alerts`, commit
+`c3ca5f7`): de 19 alertas quedan **2, ambas `sharp`** (#10, #38) — dormido a
+propósito, sin acción pendiente. Las 17 restantes pasaron a `fixed`. Efecto
+secundario cosmético sin resolver: Vite 6 ahora imprime un warning (no
+error, tests igual pasan) en `tests/unit/version.test.ts` por los `import()`
+dinámicos de cache-busting (`?plat=${Date.now()}`) — no bloquea nada, se
+dejó igual por ser un archivo ajeno a esta tarea.
+
+**Hallazgo aparte, sin acción** (no es de las 19, Dependabot nunca lo
+marcó): `esbuild@0.18.20` transitivo vía `drizzle-kit` → paquetes
+`@esbuild-kit/*` (ya señalados `deprecated` por pnpm en cada install).
+`drizzle-kit` es CLI de build-time, nunca corre en producción — vale la
+pena revisarlo si Dependabot lo llega a marcar, no antes.
+
 **Por qué**: el severity de GitHub es sobre la librería en abstracto, no
 sobre si ESTE código la usa de forma explotable. Leer la descripción del
 advisory (`gh api repos/OWNER/REPO/dependabot/alerts/N`) y grepear el patrón
@@ -69,4 +97,12 @@ vulnerable en `src/` antes de decidir qué tan urgente es cada bump.
 
 **Cómo aplicar**: en la próxima revisión de Dependabot, repetir esta
 clasificación (producción vs. build/dev-only) antes de tocar nada, y separar
-los bumps mayores (breaking-change risk) de los parches directos.
+los bumps mayores (breaking-change risk) de los parches directos. Para fijar
+un transitivo vulnerable sin tocar el manifiesto del paquete que lo trae:
+override en **`pnpm-workspace.yaml`** (no en `package.json` → con pnpm
+10+/11 ese campo se ignora en silencio, solo WARN, nunca falla) usando el
+selector `pkg@<versión-vulnerable>: "^versión-parchada"` — el caret evita
+saltar a una línea mayor no pedida. Antes de un bump mayor de verdad
+(`vitest`/`vite`, etc.), leer la guía de migración REAL del proyecto (no
+solo un resumen) y grepear en `src/`/`tests/` los patrones que cambiaron,
+en vez de asumir por el changelog en abstracto.
