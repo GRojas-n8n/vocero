@@ -114,6 +114,20 @@ contemplado río arriba.
 2026-09-18, longitud de `state=="open"` = 0). Triaje cerrado por completo.
 Próxima revisión: solo si Dependabot abre alertas nuevas.
 
+**Reapertura 2026-09-17 (post-push, mismo alerta #3)** — exactamente el
+"hallazgo aparte, sin acción" de arriba: Dependabot volvió a marcar `esbuild`
+(GHSA-67mh-4wv8-2f99, `<= 0.24.2`) porque el árbol seguía trayendo
+`esbuild@0.18.20` transitivo vía `@esbuild-kit/core-utils` →
+`@esbuild-kit/esm-loader` (deprecated) ← `drizzle-kit@0.31.10` — una copia
+VIEJA aparte de la que ya resolvía `vite`/`vitest`/`tsx` en `>=0.25.0`. Mismo
+patrón de siempre: `esbuild@<0.25.0: "^0.25.0"` en el `overrides` de
+`pnpm-workspace.yaml`. `drizzle-kit` sigue siendo CLI de build-time (no
+corre en el standalone de producción), así que sigue sin exposición real —
+se corrigió igual por ser gratis y ya haber un parche disponible. Verificado
+`pnpm why esbuild` (quedan solo 0.25.12/0.28.2), typecheck/lint/test
+(523/523)/build limpios, y `pnpm db:generate` sigue funcionando (drizzle-kit
+no se rompió con el esbuild más nuevo).
+
 **Por qué**: el severity de GitHub es sobre la librería en abstracto, no
 sobre si ESTE código la usa de forma explotable. Leer la descripción del
 advisory (`gh api repos/OWNER/REPO/dependabot/alerts/N`) y grepear el patrón

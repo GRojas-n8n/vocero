@@ -19,3 +19,8 @@ overrides:
   baseline-browser-mapping@<2.11.0: "^2.11.0"
   postcss@<8.5.23: "^8.5.23"
   sharp@<0.35.4: "^0.35.4"
+  # 2026-09-18 — @esbuild-kit/* (deprecated, arrastrado por drizzle-kit) trae
+  # su propio esbuild@0.18.20, viejo, aparte del que ya resuelve el resto del
+  # árbol (vite/vitest/tsx) en >=0.25.0. drizzle-kit es CLI de build-time,
+  # nunca corre en el standalone de producción (memory/feedback-dependabot-triage.md).
+  esbuild@<0.25.0: "^0.25.0"
