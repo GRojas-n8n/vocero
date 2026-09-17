@@ -90,6 +90,30 @@ marcó): `esbuild@0.18.20` transitivo vía `drizzle-kit` → paquetes
 `drizzle-kit` es CLI de build-time, nunca corre en producción — vale la
 pena revisarlo si Dependabot lo llega a marcar, no antes.
 
+**Cierre total 2026-09-18** — las 2 de `sharp` (#10, #38) que se habían
+dejado "sin acción" por creerlas imposibles de fijar sin forzar una versión
+ajena: revisando de nuevo, `next@15.5.25` YA declara
+`"sharp": "^0.34.3 || ^0.35.4"` en sus propias `optionalDependencies` — la
+0.35.4 (última publicada, cierra ambas) no es una versión externa forzada,
+es una que Next ya soporta; pnpm solo había quedado resuelto en la rama
+0.34.x por ser la que ya estaba en el lockfile. Se agregó al mismo
+`overrides` de `pnpm-workspace.yaml`. Verificado con
+`pnpm typecheck/lint/test` (496/496) y `pnpm build` completo, sin errores
+ni menciones de `sharp` (sigue sin invocarse en runtime: el fix es
+preventivo, no corrige una explotación real). Commit `20576c0`.
+
+**Lección de esta última vuelta**: "no se puede sin forzar una versión
+ajena" es una suposición que hay que verificar contra el `optionalDependencies`/
+`peerDependencies` REAL del paquete que trae la dependencia transitiva
+(`npm view <paquete>@<versión> optionalDependencies`), no asumir por el
+número de versión — un salto de 0.34→0.35 se ve "mayor" pero puede estar ya
+contemplado río arriba.
+
+**Estado final: 0 de las 21 alertas originales quedan abiertas**
+(confirmado con `gh api repos/GRojas-n8n/vocero/dependabot/alerts` el
+2026-09-18, longitud de `state=="open"` = 0). Triaje cerrado por completo.
+Próxima revisión: solo si Dependabot abre alertas nuevas.
+
 **Por qué**: el severity de GitHub es sobre la librería en abstracto, no
 sobre si ESTE código la usa de forma explotable. Leer la descripción del
 advisory (`gh api repos/OWNER/REPO/dependabot/alerts/N`) y grepear el patrón
@@ -105,4 +129,9 @@ selector `pkg@<versión-vulnerable>: "^versión-parchada"` — el caret evita
 saltar a una línea mayor no pedida. Antes de un bump mayor de verdad
 (`vitest`/`vite`, etc.), leer la guía de migración REAL del proyecto (no
 solo un resumen) y grepear en `src/`/`tests/` los patrones que cambiaron,
-en vez de asumir por el changelog en abstracto.
+en vez de asumir por el changelog en abstracto. Y antes de marcar algo
+"imposible de fijar sin forzar una versión ajena" (como se hizo con `sharp`
+el 2026-09-13), revisar el `optionalDependencies`/`peerDependencies` REAL
+del paquete que trae la transitiva (`npm view <paquete>@<versión>
+optionalDependencies`) — puede que la versión parchada ya esté contemplada
+río arriba.
