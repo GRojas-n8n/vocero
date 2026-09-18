@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import {
   Archive,
   ArchiveRestore,
+  Info,
   MessageSquareText,
   Search,
   Send,
@@ -23,6 +24,20 @@ import { priorityRank } from "@/server/leads/priority";
 import { PriorityBadge } from "@/components/pipeline/priority-picker";
 import { NewContactDialog } from "./new-contact-dialog";
 import { StartConversation } from "./start-conversation";
+
+/**
+ * Auditoría 2026-09-17 — heurística SOLO informativa: nunca decide qué se
+ * oculta (eso lo hace `contact.sampleType`, marcado a mano). Sirve para
+ * explicarle al operador por qué un contacto con "[Prueba]" en el nombre
+ * sigue apareciendo con el filtro encendido, en vez de dejarlo adivinando si
+ * el checkbox está roto.
+ */
+function looksLikeTestName(name: string): boolean {
+  return /\b(prueba|test|demo)\b/i.test(name);
+}
+
+const HIDE_SAMPLES_KEY = "vocero.contacts.hideSamples";
+const SHOW_ARCHIVED_KEY = "vocero.contacts.showArchived";
 
 export function ContactsClient() {
   const router = useRouter();
@@ -45,6 +60,33 @@ export function ContactsClient() {
     const typed = inputRef.current?.value ?? "";
     if (typed) setQuery(typed);
   }, []);
+
+  // Auditoría 2026-09-17 — bug reportado: la casilla se desmarcaba sola al
+  // salir del módulo y volver, porque el estado solo vivía en memoria de
+  // React. Se persiste por NAVEGADOR (localStorage), no por servidor: es una
+  // preferencia de vista, igual que el orden por prioridad de abajo.
+  useEffect(() => {
+    try {
+      setHideSamples(localStorage.getItem(HIDE_SAMPLES_KEY) === "true");
+      setShowArchived(localStorage.getItem(SHOW_ARCHIVED_KEY) === "true");
+    } catch {
+      // Almacenamiento bloqueado (modo privado, etc.): arranca en el default.
+    }
+  }, []);
+  useEffect(() => {
+    try {
+      localStorage.setItem(HIDE_SAMPLES_KEY, String(hideSamples));
+    } catch {
+      // Ignorar: la preferencia simplemente no sobrevive a esta sesión.
+    }
+  }, [hideSamples]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(SHOW_ARCHIVED_KEY, String(showArchived));
+    } catch {
+      // Ignorar: la preferencia simplemente no sobrevive a esta sesión.
+    }
+  }, [showArchived]);
 
   useEffect(() => {
     void (async () => {
@@ -92,12 +134,21 @@ export function ContactsClient() {
   const visibleContacts = hideSamples
     ? contacts.filter((c) => !c.sampleType)
     : contacts;
+  // Auditoría 2026-09-17 — sin este contador, activar el filtro y no ver
+  // cambios (porque nada en la página actual está marcado demo/system) es
+  // indistinguible de un checkbox roto. Con él, el operador ve "0 ocultos" y
+  // entiende que el filtro SÍ corrió, solo que no encontró nada que tapar.
+  const hiddenSampleCount = contacts.length - visibleContacts.length;
 
   return (
     <div className="flex h-full flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-3 sm:gap-4 sm:px-6 sm:py-4">
         <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-[17px] font-bold tracking-tight">Contactos</h2>
+          <span className="font-mono text-xs text-muted-foreground">
+            {visibleContacts.length}
+            {hiddenSampleCount > 0 ? ` de ${contacts.length}` : ""}
+          </span>
           <Button size="sm" onClick={() => setCreando(true)}>
             <UserPlus className="mr-1.5 h-4 w-4" strokeWidth={1.8} />
             Nuevo contacto
@@ -113,7 +164,10 @@ export function ContactsClient() {
             />
             Ver archivados
           </label>
-          <label className="flex items-center gap-2 text-xs text-muted-foreground">
+          <label
+            className="flex items-center gap-1.5 text-xs text-muted-foreground"
+            title="Se basa en el tipo de dato marcado en la ficha de cada contacto (Editar → Tipo de dato), nunca en su nombre — un contacto llamado «[Prueba] …» pero marcado como real NO se oculta aquí."
+          >
             <input
               type="checkbox"
               checked={hideSamples}
@@ -121,6 +175,12 @@ export function ContactsClient() {
               className="accent-primary"
             />
             Ocultar datos de prueba/sistema
+            <Info className="h-3.5 w-3.5" strokeWidth={1.8} aria-hidden />
+            {hideSamples && (
+              <span className="font-mono">
+                ({hiddenSampleCount} oculto{hiddenSampleCount === 1 ? "" : "s"})
+              </span>
+            )}
           </label>
           {stages.length > 0 && (
             <select
@@ -154,7 +214,17 @@ export function ContactsClient() {
       <div className="flex-1 overflow-y-auto p-4 sm:p-6">
         {visibleContacts.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
-            {query.trim() || stage !== "all" ? (
+            {hideSamples && contacts.length > 0 ? (
+              <>
+                <p className="text-sm font-medium">
+                  {contacts.length} contacto{contacts.length === 1 ? "" : "s"}{" "}
+                  oculto{contacts.length === 1 ? "" : "s"} por ser de prueba/sistema
+                </p>
+                <p className="max-w-sm text-xs text-muted-foreground">
+                  Desactiva «Ocultar datos de prueba/sistema» para verlos.
+                </p>
+              </>
+            ) : query.trim() || stage !== "all" ? (
               <>
                 <p className="text-sm font-medium">Sin resultados</p>
                 <p className="max-w-sm text-xs text-muted-foreground">
@@ -204,6 +274,20 @@ export function ContactsClient() {
                         title="No cuenta en Resultados/Pipeline/Bandeja"
                       >
                         {c.sampleType === "demo" ? "Demostración" : "Sistema"}
+                      </Badge>
+                    )}
+                    {/* Auditoría 2026-09-17 — aviso SOLO informativo: el
+                        nombre nunca decide la clasificación (por eso este
+                        contacto sigue siendo "real" y visible con el filtro
+                        encendido); esto explica el porqué en vez de dejar que
+                        parezca un checkbox roto. */}
+                    {!c.sampleType && looksLikeTestName(c.name) && (
+                      <Badge
+                        variant="outline"
+                        title="El nombre sugiere una prueba, pero está clasificado como prospecto real: no se oculta con «Ocultar datos de prueba/sistema». Cámbialo en Editar → Tipo de dato si corresponde."
+                      >
+                        <Info className="mr-1 h-3 w-3" strokeWidth={1.8} />
+                        ¿Prueba?
                       </Badge>
                     )}
                     {/* Solo la fuente que alguien capturó: presentar una

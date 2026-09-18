@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Search, Sparkles, UserRound, X } from "lucide-react";
+import { AlertCircle, Archive, Search, Sparkles, UserRound, X } from "lucide-react";
 import type { ConversationDto } from "@/lib/types";
 import { CHANNEL_LABEL, type Channel } from "@/lib/channels";
 import { ChannelBadge } from "@/components/channel-badge";
@@ -65,6 +65,8 @@ export function ConversationList({
   selectedId,
   onSelect,
   onSeeded,
+  showArchived,
+  onShowArchivedChange,
 }: {
   conversations: ConversationDto[] | null;
   /** Canales encendidos en esta instancia (ADR-001). */
@@ -72,6 +74,10 @@ export function ConversationList({
   selectedId: string | null;
   onSelect: (id: string) => void;
   onSeeded: () => void;
+  /** Auditoría 2026-09-17 — agrega (no reemplaza) las conversaciones cuyo
+   *  contacto está archivado; ver ContactDto.archivedAt. */
+  showArchived: boolean;
+  onShowArchivedChange: (value: boolean) => void;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "unread" | "pending">("all");
@@ -142,6 +148,18 @@ export function ConversationList({
         <div className="mb-3 flex items-center gap-2">
           <h2 className="text-[17px] font-bold tracking-tight">Bandeja</h2>
           <span className="font-mono text-[12px] text-text-3">{conversations.length}</span>
+          <label
+            className="flex items-center gap-1.5 text-[11px] text-text-3"
+            title="Muestra también las conversaciones de contactos ARCHIVADOS, sin quitar las activas. Un mensaje nuevo desarchiva al contacto automáticamente."
+          >
+            <input
+              type="checkbox"
+              checked={showArchived}
+              onChange={(e) => onShowArchivedChange(e.target.checked)}
+              className="accent-primary"
+            />
+            Ver archivados
+          </label>
           {multiChannel && (
             <div className="ml-auto flex items-center gap-1">
               {channels.map((ch) => {
@@ -325,6 +343,15 @@ export function ConversationList({
                         )}
                       </span>
                       <span className="mt-1.5 flex items-center gap-1.5">
+                        {c.contact.archivedAt && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-border-strong bg-background px-2 py-0.5 text-[11px] text-text-3"
+                            title="Contacto archivado desde Contactos — no compite en el tablero activo. Escribir aquí no lo desarchiva; un mensaje NUEVO del prospecto sí."
+                          >
+                            <Archive className="h-3 w-3" strokeWidth={1.7} />
+                            Archivado
+                          </span>
+                        )}
                         {c.stageName && (
                           <span className="inline-flex items-center gap-1.5 rounded-full border border-border-strong bg-background px-2 py-0.5 text-[11px] font-medium text-text-2">
                             <span

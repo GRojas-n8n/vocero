@@ -15,6 +15,20 @@ import type {
 } from "./types";
 
 /**
+ * Auditoría 2026-09-17 — política de visibilidad de este módulo, para no
+ * repetirla en cada función:
+ *  - `excludingSampleContacts` SIEMPRE se aplica: demo/system nunca deben
+ *    inflar un número que el dueño usa para decidir.
+ *  - `contact.archivedAt` NUNCA se filtra aquí. Archivar es una preferencia
+ *    de vista de Contactos/Pipeline/Bandeja ("hoy no lo trabajo"), no un
+ *    borrado ni una corrección del pasado: un trato REAL que se archivó
+ *    después de ganarse o perderse sigue contando en su mes de cierre. Si el
+ *    negocio algún día pide lo contrario, es una decisión de producto nueva
+ *    (qué cuenta como "activo" para efectos de reporte), no un bug de esta
+ *    capa — y merece su propio flag explícito, no un filtro silencioso aquí.
+ */
+
+/**
  * Mismo criterio que `lib/money.ts#sumable`: solo entra al total el monto
  * capturado en la moneda del negocio (o sin moneda propia, que hereda la del
  * negocio). Sumar monedas distintas sin tipo de cambio sería un total falso.

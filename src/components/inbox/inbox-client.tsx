@@ -50,10 +50,29 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
   // Se incrementa con cada evento SSE que puede cambiar la etapa/lead o el
   // estado del agente: el panel de detalles lo observa y refetch en vivo.
   const [detailRev, setDetailRev] = useState(0);
+  // Auditoría 2026-09-17 — "Ver archivados": mismo contrato que Contactos
+  // (agrega, no reemplaza la vista activa) y persiste por navegador para no
+  // repetir el bug de la casilla que se desmarca sola al volver al módulo.
+  const [showArchived, setShowArchived] = useState(false);
 
   useEffect(() => {
     if (!isWideEnoughForPanel()) return;
     setPanelOpen(localStorage.getItem("vocero.panelOpen") !== "false");
+  }, []);
+  useEffect(() => {
+    try {
+      setShowArchived(localStorage.getItem("vocero.inbox.showArchived") === "true");
+    } catch {
+      // Almacenamiento bloqueado: arranca en el default (oculto).
+    }
+  }, []);
+  const toggleShowArchived = useCallback((value: boolean) => {
+    setShowArchived(value);
+    try {
+      localStorage.setItem("vocero.inbox.showArchived", String(value));
+    } catch {
+      // Ignorar: la preferencia no sobrevive a esta sesión.
+    }
   }, []);
   const togglePanel = useCallback((open: boolean) => {
     setPanelOpen(open);
@@ -72,8 +91,14 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
   // simultáneos pueden llegar a Meta en desorden.
   const sendQueue = useRef<Promise<unknown>>(Promise.resolve());
 
+  const showArchivedRef = useRef(showArchived);
+  showArchivedRef.current = showArchived;
+
   const refetchConversations = useCallback(async () => {
-    const res = await fetch("/api/conversations").catch(() => null);
+    const url = showArchivedRef.current
+      ? "/api/conversations?archived=true"
+      : "/api/conversations";
+    const res = await fetch(url).catch(() => null);
     if (!res?.ok) return;
     const data = (await res.json()) as { conversations: ConversationDto[] };
     setConversations(data.conversations);
@@ -91,7 +116,7 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
 
   useEffect(() => {
     void refetchConversations();
-  }, [refetchConversations]);
+  }, [refetchConversations, showArchived]);
 
   const markRead = useCallback((id: string) => {
     void fetch(`/api/conversations/${id}`, {
@@ -337,6 +362,8 @@ export function InboxClient({ channels }: { channels: readonly Channel[] }) {
           selectedId={selectedId}
           onSelect={select}
           onSeeded={() => void refetchConversations()}
+          showArchived={showArchived}
+          onShowArchivedChange={toggleShowArchived}
         />
       </section>
 

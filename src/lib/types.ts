@@ -6,7 +6,13 @@ export type ConversationDto = {
   id: string;
   /** 014: canal de la conversacion, para el distintivo de la bandeja. */
   channel: Channel;
-  contact: { id: string; name: string; phone: string | null };
+  contact: {
+    id: string;
+    name: string;
+    phone: string | null;
+    /** Auditoría 2026-09-17: archivado explícito del contacto — ver ContactDto. */
+    archivedAt: string | null;
+  };
   stageName: string | null;
   aiEnabled: boolean;
   handoffAt: string | null;

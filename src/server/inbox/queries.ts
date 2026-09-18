@@ -1,13 +1,40 @@
-import { and, desc, eq, gt, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, sql, type SQL } from "drizzle-orm";
 import { getDb, schema } from "@/lib/db";
 import { scoped } from "@/lib/db/tenant";
 import { isWindowOpen, windowRemainingMs } from "@/server/inbox/window";
 import { isPendingReply } from "@/server/inbox/pending";
 import type { ConversationDto } from "@/lib/types";
 
+/**
+ * Auditoría 2026-09-17 — visibilidad de la Bandeja, en un solo lugar para no
+ * repetir el criterio entre `listConversations` y quien lo pruebe. Por
+ * defecto excluye:
+ *  - datos de prueba/sistema (Fase 4, `contact.sample_type`);
+ *  - contactos ARCHIVADOS (`contact.archived_at`): archivar es "hoy no lo
+ *    trabajo", no "bórralo", así que por default no compite con la bandeja
+ *    activa. `includeArchived` es el mismo patrón que "Ver archivados" en
+ *    Contactos: agrega los archivados a la lista, nunca oculta los activos.
+ * Un mensaje entrante nuevo desarchiva el contacto (ver
+ * `ingestInboundMessage`), así que jamás se pierde en silencio.
+ */
+export function conversationVisibilityWhere(
+  organizationId: string,
+  opts: { since?: Date; includeArchived?: boolean } = {}
+): SQL {
+  return scoped(
+    schema.conversation.organizationId,
+    organizationId,
+    eq(schema.conversation.isTest, false),
+    isNull(schema.contact.sampleType),
+    opts.includeArchived ? undefined : isNull(schema.contact.archivedAt),
+    opts.since ? gt(schema.conversation.updatedAt, opts.since) : undefined
+  );
+}
+
 export async function listConversations(
   organizationId: string,
-  since?: Date
+  since?: Date,
+  opts: { includeArchived?: boolean } = {}
 ): Promise<ConversationDto[]> {
   const db = getDb();
   const previewSql = sql<string | null>`(
@@ -47,18 +74,7 @@ export async function listConversations(
       schema.contact,
       eq(schema.conversation.contactId, schema.contact.id)
     )
-    .where(
-      scoped(
-        schema.conversation.organizationId,
-        organizationId,
-        eq(schema.conversation.isTest, false),
-        // Fase 4: un contacto marcado a mano como demo/sistema (ver
-        // schema.ts `contact.sampleType`) no debe mezclarse con conversaciones
-        // reales en la Bandeja — se administra/desmarca desde Contactos.
-        isNull(schema.contact.sampleType),
-        since ? gt(schema.conversation.updatedAt, since) : undefined
-      )
-    )
+    .where(conversationVisibilityWhere(organizationId, { since, ...opts }))
     .orderBy(desc(sql`coalesce(${schema.conversation.lastMessageAt}, ${schema.conversation.createdAt})`));
 
   return rows.map((r) =>
@@ -140,7 +156,12 @@ export function serializeConversation(
   return {
     id: c.id,
     channel: c.channel,
-    contact: { id: contact.id, name: contact.name, phone: contact.phone },
+    contact: {
+      id: contact.id,
+      name: contact.name,
+      phone: contact.phone,
+      archivedAt: contact.archivedAt?.toISOString() ?? null,
+    },
     stageName,
     aiEnabled: c.aiEnabled,
     handoffAt: c.handoffAt?.toISOString() ?? null,

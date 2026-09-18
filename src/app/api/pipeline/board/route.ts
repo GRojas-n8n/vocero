@@ -38,7 +38,14 @@ export const GET = withAuth(async (session) => {
         // Fase 4: un contacto marcado a mano como demo/sistema (ver
         // schema.ts `contact.sampleType`) no es un trato real — se
         // administra/desmarca desde Contactos, no aquí.
-        isNull(schema.contact.sampleType)
+        isNull(schema.contact.sampleType),
+        // Auditoría 2026-09-17: un contacto ARCHIVADO no es una oportunidad
+        // activa — el bug reportado era justo este join, que no miraba
+        // `archivedAt` y dejaba el trato compitiendo en el tablero después de
+        // archivar desde Contactos. El histórico (ganado/perdido) de un trato
+        // real archivado NO se toca aquí: sigue contando en Resultados
+        // (server/results/metrics.ts), solo desaparece del tablero activo.
+        isNull(schema.contact.archivedAt)
       )
     )
     .orderBy(asc(schema.lead.position));
