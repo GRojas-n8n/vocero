@@ -21,6 +21,7 @@ import { agendaEnabled } from "@/server/agenda/flag";
 import { bookSlot, offerSlots, recordRescheduleRequest } from "@/server/agenda/agent";
 import { getOffers } from "@/server/agenda/offers";
 import { awaitMediaJob } from "@/server/whatsapp/media";
+import { recordAiNote } from "@/server/contacts/notes";
 
 /**
  * Turno del agente (FR-021..FR-025).
@@ -417,7 +418,14 @@ export async function runAgentTurn(
       await deliverReply(conversation, action.text);
       return;
     case "update_lead": {
-      await appendLeadNote(organizationId, conversation.contactId, action.note);
+      await recordAiNote({
+        organizationId,
+        contactId: conversation.contactId,
+        note: action.note,
+        scenario: action.scenario ?? null,
+        isTest: conversation.isTest,
+        sourceMessageId: lastInbound.id,
+      });
       if (action.reply) await deliverReply(conversation, action.reply);
       return;
     }
@@ -558,25 +566,3 @@ async function moveLeadToStage(
   });
 }
 
-async function appendLeadNote(
-  organizationId: string,
-  contactId: string,
-  note: string
-): Promise<void> {
-  const db = getDb();
-  const rows = await db
-    .select({ id: schema.contact.id, notes: schema.contact.notes })
-    .from(schema.contact)
-    .where(eq(schema.contact.id, contactId))
-    .limit(1);
-  const contact = rows[0];
-  if (!contact) return;
-  const stamped = `[IA] ${note}`;
-  await db
-    .update(schema.contact)
-    .set({
-      notes: contact.notes ? `${contact.notes}\n${stamped}` : stamped,
-      updatedAt: new Date(),
-    })
-    .where(eq(schema.contact.id, contact.id));
-}

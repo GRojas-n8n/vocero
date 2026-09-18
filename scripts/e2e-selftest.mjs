@@ -1636,6 +1636,120 @@ async function agendaChecks() {
     body: JSON.stringify({ enabled: false }),
   });
 
+  console.log(
+    "\n== Auditoría 2026-09-17 (incidente GRojas/Más Impulso): hechos de la IA no se fusionan ni duplican =="
+  );
+  // Bug reportado: `update_lead` concatenaba `[IA] {nota}` sin fin al
+  // `contact.notes` de texto libre — diez turnos producían diez párrafos
+  // acumulativos, mezclando giros de negocio incompatibles bajo el mismo
+  // contacto. Este guion reproduce justo eso contra la app real (pipeline
+  // in-process + ai-mock + Postgres real) y afirma que `recordAiNote`
+  // (server/contacts/notes.ts) lo evita en el SERVIDOR, no solo en el prompt.
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true }),
+  });
+  const LEAD_NOTAS = `52148${RUN}06`;
+  // El identity/contact.phone normaliza 521→52 (igual que LEAD_MAX arriba):
+  // hay que comparar contra la forma normalizada, no contra el `from` crudo.
+  const LEAD_NOTAS_NORM = LEAD_NOTAS.replace(/^521/, "52");
+  const NOMBRE_NOTAS = `Lead notas IA ${RUN}`;
+
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_NOTAS,
+      name: NOMBRE_NOTAS,
+      text: "giro: plomería. Quiere cotización de tinacos de 300 litros",
+      waMessageId: `wamid.e2e.notas.${RUN}.1`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  const contactoNotas = (
+    (await api("/api/conversations")).json?.conversations ?? []
+  ).find((c) => c.contact.phone === LEAD_NOTAS_NORM)?.contact;
+  ok("el contacto del guion de notas quedó localizable", Boolean(contactoNotas));
+
+  let detalleNotas = (
+    await api(`/api/contacts/${contactoNotas?.id}`)
+  ).json;
+  ok(
+    "el primer hecho queda confirmado con su giro",
+    detalleNotas?.aiNotes?.length === 1 &&
+      detalleNotas.aiNotes[0]?.status === "confirmed" &&
+      detalleNotas.aiNotes[0]?.scenario === "plomería",
+    JSON.stringify(detalleNotas?.aiNotes)
+  );
+  ok(
+    "el hallazgo de la IA NUNCA tocó el campo de notas del dueño",
+    detalleNotas?.contact?.notes === null || detalleNotas?.contact?.notes === "",
+    JSON.stringify(detalleNotas?.contact?.notes)
+  );
+
+  // Ráfaga/reintento: el mismo hecho, otra vez. Un mensaje entrante distinto
+  // (wa_message_id nuevo) pero el mismo contenido — la deduplicación vive en
+  // `contact_note` (hash del texto), no en la idempotencia del webhook.
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_NOTAS,
+      name: NOMBRE_NOTAS,
+      text: "giro: plomería. Quiere cotización de tinacos de 300 litros",
+      waMessageId: `wamid.e2e.notas.${RUN}.2`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  detalleNotas = (await api(`/api/contacts/${contactoNotas?.id}`)).json;
+  ok(
+    "el mismo hecho repetido NO produce una segunda fila (dedup real)",
+    detalleNotas?.aiNotes?.length === 1,
+    JSON.stringify(detalleNotas?.aiNotes)
+  );
+
+  // Giro incompatible con el mismo teléfono (justo el patrón del incidente:
+  // alguien probando negocios distintos con el mismo contacto real).
+  await api("/api/dev/wa-mock/inbound", {
+    method: "POST",
+    body: JSON.stringify({
+      phoneNumberId: PN,
+      from: LEAD_NOTAS,
+      name: NOMBRE_NOTAS,
+      text: "giro: clínica dental. Pregunta por limpieza dental",
+      waMessageId: `wamid.e2e.notas.${RUN}.3`,
+    }),
+  });
+  await sleep(coalesceMs + 3000);
+
+  detalleNotas = (await api(`/api/contacts/${contactoNotas?.id}`)).json;
+  const notaConflicto = detalleNotas?.aiNotes?.find(
+    (n) => n.scenario === "clínica dental"
+  );
+  ok(
+    "un giro distinto se guarda como 'conflict', nunca fusionado bajo 'confirmed'",
+    notaConflicto?.status === "conflict",
+    JSON.stringify(detalleNotas?.aiNotes)
+  );
+  ok(
+    "el hecho de plomería original sigue 'confirmed' (no se reinterpretó)",
+    detalleNotas?.aiNotes?.find((n) => n.scenario === "plomería")?.status ===
+      "confirmed",
+    JSON.stringify(detalleNotas?.aiNotes)
+  );
+  ok(
+    "en total quedaron 2 hechos (el duplicado del paso anterior no cuenta)",
+    detalleNotas?.aiNotes?.length === 2,
+    JSON.stringify(detalleNotas?.aiNotes)
+  );
+
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: false }),
+  });
+
   console.log("\n== 015: el operador y el enlace pendiente (US4) ==");
   const bookingId = creada.json?.bookingId;
   const cancelada1 = await api(`/api/bookings/${bookingId}`, {

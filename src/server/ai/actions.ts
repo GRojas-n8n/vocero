@@ -10,7 +10,22 @@ const baseActions = [
   z.object({ action: z.literal("reply"), text: z.string().min(1) }),
   z.object({
     action: z.literal("update_lead"),
-    note: z.string().min(1),
+    /**
+     * Auditoría 2026-09-17 (incidente GRojas) — UN hecho atómico y nuevo que
+     * el cliente acaba de confirmar, nunca un resumen acumulado de todo lo
+     * dicho hasta ahora. Acotado a propósito: obliga a que sea una frase, no
+     * un párrafo que reescriba la conversación entera.
+     */
+    note: z.string().trim().min(1).max(300),
+    /**
+     * Giro/tema breve de ESTE hecho (p. ej. "plomería", "clínica dental").
+     * Sin esto, el servidor no puede distinguir "este contacto sigue
+     * hablando del mismo negocio" de "alguien está probando/preguntando por
+     * uno distinto con el mismo teléfono" — y sin esa distinción, dos giros
+     * incompatibles terminan mezclados en la misma ficha. Omítelo solo si de
+     * verdad no aplica (p. ej. una nota logística que no depende del giro).
+     */
+    scenario: z.string().trim().min(1).max(80).optional(),
     reply: z.string().optional(),
   }),
   z.object({

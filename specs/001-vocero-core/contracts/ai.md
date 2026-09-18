@@ -16,7 +16,8 @@ proveedor NUNCA propaga excepción al turno: agota reintentos → resultado `err
 const AgentAction = z.discriminatedUnion('action', [
   z.object({ action: z.literal('none') }),
   z.object({ action: z.literal('reply'), text: z.string().min(1) }),
-  z.object({ action: z.literal('update_lead'), note: z.string().min(1),
+  z.object({ action: z.literal('update_lead'), note: z.string().trim().min(1).max(300),
+             scenario: z.string().trim().min(1).max(80).optional(),
              reply: z.string().optional() }),
   z.object({ action: z.literal('move_stage'), stage: z.string().min(1),
              reply: z.string().optional() }),
@@ -27,6 +28,13 @@ const AgentAction = z.discriminatedUnion('action', [
 
 - `move_stage.stage` se resuelve contra nombres de etapas de la org (fuzzy exacto →
   lower-case); sin match → se degrada a `reply` si trae texto, o `none`.
+- Auditoría 2026-09-17 (incidente GRojas/Más Impulso) — `update_lead` ya NO escribe en
+  `contact.notes` (ese campo es 100% del dueño). Cada nota es UN hecho atómico y va a
+  `contact_note` (`server/contacts/notes.ts`, `recordAiNote`), deduplicado por hash y con
+  estado `confirmed | test | conflict`: `test` si `conversation.is_test`; `conflict` si
+  `scenario` no coincide con el último `scenario` `confirmed` del mismo contacto (giro de
+  negocio incompatible con el mismo teléfono — nunca se fusiona bajo `confirmed`). Ninguna
+  fila cambia de estado después de creada.
 - Regex de respaldo de handoff (se evalúa sobre el mensaje del cliente ANTES del LLM):
   `/(hablar|comunicar|contactar)[\s\S]{0,40}?(asesor|humano|persona|alguien)|un asesor|atenci[oó]n humana/i`
   — "somos 4 personas" NO matchea (unit test).

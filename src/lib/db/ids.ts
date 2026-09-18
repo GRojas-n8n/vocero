@@ -21,6 +21,7 @@ const prefixes = {
   testRun: "run",
   testCase: "case",
   mediaAsset: "ma",
+  contactNote: "cn",
   // 015 — motor de agenda
   calendarSettings: "cal",
   booking: "bk",

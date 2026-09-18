@@ -433,6 +433,76 @@ export const message = pgTable(
 );
 
 /**
+ * Auditoría 2026-09-17 (incidente GRojas/Más Impulso) — hechos ATÓMICOS que el
+ * agente de IA levanta de una conversación real, con origen y estado de
+ * confirmación. Reemplaza el viejo patrón de `appendLeadNote` (concatenar
+ * `[IA] ...` sin fin al `contact.notes` de texto libre): aquella fila única
+ * mezclaba diez resúmenes acumulativos, giros de negocio incompatibles e
+ * inferencias presentadas como hechos, todo en el mismo campo que el dueño
+ * edita a mano.
+ *
+ * `contact.notes` sigue existiendo pero pasa a ser 100% del dueño: el agente
+ * YA NO escribe ahí. Sus hallazgos viven aquí, uno por fila, nunca reescritos
+ * ni fusionados — corregir es agregar una fila nueva, igual que
+ * `lead_stage_event`.
+ */
+export const contactNote = pgTable(
+  "contact_note",
+  {
+    id: text("id").primaryKey(),
+    organizationId: text("organization_id")
+      .notNull()
+      .references(() => organization.id, { onDelete: "cascade" }),
+    contactId: text("contact_id")
+      .notNull()
+      .references(() => contact.id, { onDelete: "cascade" }),
+    /** Por ahora siempre 'ai': puerta abierta para anotar origen humano
+     *  estructurado más adelante sin migrar de nuevo. */
+    source: text("source", { enum: ["ai", "human"] })
+      .notNull()
+      .default("ai"),
+    /**
+     * confirmed = el cliente lo dijo en una conversación real y el giro
+     * coincide con lo ya establecido para este contacto. test = la
+     * conversación es del Laboratorio (`conversation.is_test`). conflict =
+     * el giro/escenario mencionado NO coincide con el ya confirmado para este
+     * contacto (alguien probando otro negocio con el mismo teléfono): se
+     * guarda para auditoría pero NUNCA alimenta ficha, etapa ni métricas.
+     * Ninguna fila cambia de estado después de creada — corregirla es dejar
+     * que un mensaje posterior escriba una fila nueva, no reinterpretar esta.
+     */
+    status: text("status", { enum: ["confirmed", "test", "conflict"] })
+      .notNull()
+      .default("confirmed"),
+    /** Giro/tema breve que el propio turno declaró (p. ej. "plomería"); NULL
+     *  si el turno no lo precisó. Es lo que permite detectar el choque de
+     *  arriba sin adivinar a partir del texto libre de `text`. */
+    scenario: text("scenario"),
+    /** El hecho atómico tal cual, acotado (ver MAX_NOTE_LEN en
+     *  server/contacts/notes.ts) — nunca un resumen acumulado de todo lo
+     *  dicho hasta ahora. */
+    text: text("text").notNull(),
+    /** Hash del texto normalizado: la llave de deduplicación de abajo. */
+    contentHash: text("content_hash").notNull(),
+    /** Mensaje entrante que originó esta nota, si se conoce. */
+    sourceMessageId: text("source_message_id").references(() => message.id, {
+      onDelete: "set null",
+    }),
+    createdAt: timestamp("created_at").notNull().defaultNow(),
+  },
+  (t) => [
+    index("contact_note_org_contact_idx").on(
+      t.organizationId,
+      t.contactId,
+      t.createdAt
+    ),
+    // Reintentos y ráfagas de mensajes agrupadas por el coalesce no duplican:
+    // el mismo hecho para el mismo contacto se inserta una sola vez.
+    uniqueIndex("contact_note_contact_hash_uq").on(t.contactId, t.contentHash),
+  ]
+);
+
+/**
  * 008 — Adjuntos: archivo (imagen/video/audio/documento/sticker) copiado al
  * volumen local (`MEDIA_DIR`) o contenido estructurado (location/contacts) en
  * `payload`. Meta expira sus archivos (~30 días): el disco propio es la

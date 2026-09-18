@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import { Check, ChevronRight, Sparkles, UserRound } from "lucide-react";
 import type {
+  AiNoteDto,
   ConversationDto,
   FichaDto,
   FichaValue,
@@ -14,6 +15,20 @@ import { ContactAvatar } from "@/components/avatar";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { FichaPanel } from "@/components/ficha-panel";
+
+/** Auditoría 2026-09-17 — cómo se etiqueta cada hallazgo del agente en el
+ *  panel (ver server/contacts/notes.ts para el significado de cada estado). */
+const AI_NOTE_STATUS: Record<
+  AiNoteDto["status"],
+  { label: string; className: string }
+> = {
+  confirmed: { label: "Confirmado", className: "bg-success-tint text-success-text" },
+  test: { label: "Prueba", className: "bg-subtle text-text-3" },
+  conflict: {
+    label: "Revisar giro",
+    className: "bg-warning-tint text-warning-text",
+  },
+};
 
 const HANDOFF_LABELS: Record<string, string> = {
   cliente: "El cliente pidió un humano",
@@ -40,6 +55,7 @@ export function ContactPanel({
   onClose: () => void;
 }) {
   const [notes, setNotes] = useState("");
+  const [aiNotes, setAiNotes] = useState<AiNoteDto[]>([]);
   const [ficha, setFicha] = useState<FichaDto>({});
   const [notesLoaded, setNotesLoaded] = useState(false);
   const [savingNotes, setSavingNotes] = useState(false);
@@ -71,6 +87,7 @@ export function ContactPanel({
       setFicha(detail.contact?.ficha ?? {});
       setCurrentStageId(detail.stage?.id ?? null);
       setLeadId(detail.lead?.id ?? null);
+      setAiNotes(detail.aiNotes ?? []);
     }
     if (stagesRes) setStages(stagesRes.stages);
     setAgentEnabled(Boolean(agentRes?.profile?.enabled));
@@ -92,6 +109,7 @@ export function ContactPanel({
       setFicha(detail.contact?.ficha ?? {});
       setCurrentStageId(detail.stage?.id ?? null);
       setLeadId(detail.lead?.id ?? null);
+      setAiNotes(detail.aiNotes ?? []);
     }
     if (agentRes) {
       setAgentEnabled(Boolean(agentRes.profile?.enabled));
@@ -333,6 +351,41 @@ export function ContactPanel({
             {savingNotes ? "Guardando…" : "Guardar notas"}
           </Button>
         </section>
+
+        {/* Auditoría 2026-09-17 — hallazgos del agente: SOLO LECTURA y
+            separados de Notas a propósito. El agente ya no escribe en el
+            campo de arriba (era el origen del bug de párrafos [IA]
+            acumulados); esto es su bitácora, un hecho por fila, con origen y
+            estado de confirmación. */}
+        {aiNotes.length > 0 && (
+          <section className="border-t p-4">
+            <p className="kicker mb-2">Hallazgos de la IA</p>
+            <ul className="space-y-2">
+              {aiNotes.map((n) => {
+                const meta = AI_NOTE_STATUS[n.status];
+                return (
+                  <li key={n.id} className="rounded-md border bg-subtle p-2.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-medium",
+                          meta.className
+                        )}
+                      >
+                        {meta.label}
+                        {n.scenario ? ` · ${n.scenario}` : ""}
+                      </span>
+                      <span className="text-[10px] text-text-3">
+                        {new Date(n.createdAt).toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="mt-1.5 text-[13px] text-text-2">{n.text}</p>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        )}
       </div>
     </div>
   );

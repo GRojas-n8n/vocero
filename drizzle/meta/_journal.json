@@ -148,6 +148,13 @@
       "when": 1789660715113,
       "tag": "0020_mushy_wolfsbane",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1789671608773,
+      "tag": "0021_curvy_photon",
+      "breakpoints": true
     }
   ]
 }

@@ -72,6 +72,21 @@ export function aiMockCompletion(messages: InMessage[]): string {
 
   const text = lastUser.toLowerCase();
 
+  // Auditoría 2026-09-17 (incidente GRojas/Más Impulso) — marcador
+  // determinista para ejercitar update_lead/recordAiNote de punta a punta en
+  // el self-test (contrato ai.md). Formato del mensaje de prueba:
+  // "giro: <giro>. <hecho>" — nunca aparece en una conversación real, así
+  // que no compite con ningún otro disparador de abajo.
+  const giroMatch = lastUser.match(/^giro:\s*([^.]+)\.\s*(.+)$/i);
+  if (giroMatch) {
+    return JSON.stringify({
+      action: "update_lead",
+      scenario: giroMatch[1]!.trim(),
+      note: giroMatch[2]!.trim(),
+      reply: "Anotado, gracias por la información.",
+    });
+  }
+
   // Persona pide_humano (el regex de respaldo captura la frase canónica; esta
   // rama cubre variantes que llegan al modelo).
   if (text.includes("humano") || text.includes("asesor")) {

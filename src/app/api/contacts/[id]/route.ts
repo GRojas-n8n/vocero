@@ -9,6 +9,7 @@ import {
   serializeContact,
 } from "@/server/contacts";
 import { upsertFicha } from "@/server/bot/ficha";
+import { listAiNotes } from "@/server/contacts/notes";
 
 export const dynamic = "force-dynamic";
 
@@ -19,6 +20,7 @@ export const GET = withAuth(async (session, _req: Request, ctx: Params) => {
   const contact = await getContactById(session.organizationId, id);
   if (!contact) return apiError(404, "not_found", "Contacto no encontrado");
   const stageRow = await getContactStage(session.organizationId, id);
+  const aiNotes = await listAiNotes(session.organizationId, id);
   return Response.json({
     contact: serializeContact(contact),
     stage: stageRow
@@ -30,6 +32,15 @@ export const GET = withAuth(async (session, _req: Request, ctx: Params) => {
         }
       : null,
     lead: stageRow ? { id: stageRow.lead.id } : null,
+    // Auditoría 2026-09-17 — hallazgos atómicos del agente (ver
+    // server/contacts/notes.ts); NUNCA se mezclan con `contact.notes`.
+    aiNotes: aiNotes.map((n) => ({
+      id: n.id,
+      text: n.text,
+      status: n.status,
+      scenario: n.scenario,
+      createdAt: n.createdAt.toISOString(),
+    })),
   });
 });
 

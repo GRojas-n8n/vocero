@@ -117,6 +117,22 @@ export type ContactDto = {
   sampleType?: "demo" | "system" | null;
 };
 
+/**
+ * Auditoría 2026-09-17 (incidente GRojas/Más Impulso) — un hecho atómico que
+ * el agente de IA registró de una conversación real. Ver
+ * `server/contacts/notes.ts`: nunca se mezcla con `ContactDto.notes` (eso es
+ * 100% del dueño).
+ */
+export type AiNoteDto = {
+  id: string;
+  text: string;
+  /** confirmed = hecho real; test = conversación del Laboratorio; conflict =
+   *  giro distinto al ya establecido para este contacto — revisar a mano. */
+  status: "confirmed" | "test" | "conflict";
+  scenario: string | null;
+  createdAt: string;
+};
+
 /* ============================================================
  * Bitácora de etapas
  * ============================================================ */
