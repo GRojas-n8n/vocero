@@ -31,6 +31,7 @@ externas: el trabajo en segundo plano (agente, Laboratorio) es in-process.
 | El cerebro/proveedor LLM | `src/lib/ai/` (adaptador OpenRouter-compatible, `chatJson<T>`) |
 | El comportamiento/prompt del agente | `src/server/ai/prompts.ts` |
 | Las acciones que puede tomar el agente | `src/server/ai/actions.ts` + ejecución en `src/server/ai/pipeline.ts` |
+| Qué pasa cuando el modelo no responde con el formato pedido | `src/lib/ai/` (clasificación, reintentos, `response_format`) + `src/server/ai/recovery.ts` (texto plano) + `handleModelFailure` en `pipeline.ts` — spec [023](specs/023-respuesta-estructurada-agente/spec.md) |
 | Las personas o el juez del Laboratorio | `src/server/lab/personas.ts` · `src/server/lab/judge.ts` |
 | El canal WhatsApp (Graph API) | `src/lib/meta/` (cliente único) + `src/server/whatsapp/` |
 | Los canales opcionales (Instagram, Messenger; ADR-001) | `src/lib/channels.ts` (catálogo) · `src/server/channels/` (capacidades y bandera `CHANNELS`) · `src/server/instagram/` · `src/server/messenger/` · `src/server/zernio/` (transporte y firma de la API unificada, compartido) |
@@ -98,6 +99,17 @@ OPENROUTER_API_TOKEN=sk-or-...
 OPENROUTER_MODEL=anthropic/claude-sonnet-4.5
 OPENROUTER_JUDGE_MODEL=anthropic/claude-haiku-4.5   # opcional: juez más barato
 ```
+
+Respuesta estructurada del agente (spec 023): `AI_RESPONSE_FORMAT` (`auto` por
+defecto | `json_schema` | `json_object` | `off`) y `AI_FALLBACK_MESSAGE` (mensaje
+fijo de degradación cuando el modelo no entrega una respuesta utilizable). Un
+turno del agente hace ≤ 3 llamadas al proveedor (presupuesto compartido); no
+bajes de `response_format` ante un 400 genérico (ver `rejection.ts`). Todo
+esquema enviado al proveedor se registra en `src/server/ai/schemas.ts`. La
+prueba real contra OpenRouter (`pnpm test:ai-live`) consume saldo: nunca la
+corras sin autorización expresa. Los
+logs de IA (`src/lib/ai/log.ts`) llevan sólo datos operativos: jamás contenido
+del cliente ni del modelo — no agregues `raw`/`detail` con texto del modelo.
 
 Para el self-test local existe además el modo de pruebas interno (mocks) —
 ver `specs/001-vocero-core/quickstart.md`. Nunca actives mocks en producción.

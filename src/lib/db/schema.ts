@@ -372,6 +372,20 @@ export const conversation = pgTable(
     lastInboundAt: timestamp("last_inbound_at"),
     lastMessageAt: timestamp("last_message_at"),
     unreadCount: integer("unread_count").notNull().default(0),
+    /**
+     * 023 — Estado TÉCNICO de los fallos de IA de esta conversación, aislado
+     * del texto que ve el cliente (antes se deducía comparando el último
+     * mensaje saliente con el texto de degradación: frágil ante un cambio de
+     * `AI_FALLBACK_MESSAGE`, un mensaje editado o un operador que escribe lo
+     * mismo). `ai_fail_count` = fallos de formato CONSECUTIVOS; se incrementa
+     * de forma atómica en SQL (varias instancias/reinicios sin carreras) y
+     * vuelve a 0 con el siguiente turno exitoso o al reactivar la IA.
+     * `ai_fail_kind` = código del último fallo (o `circuit_open` si el
+     * circuito de protección avisó al cliente); `ai_fail_at` = cuándo.
+     */
+    aiFailCount: integer("ai_fail_count").notNull().default(0),
+    aiFailKind: text("ai_fail_kind"),
+    aiFailAt: timestamp("ai_fail_at"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },

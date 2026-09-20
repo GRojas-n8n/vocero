@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "node --env-file=.env scripts/e2e-selftest.mjs",
+    "test:ai-live": "node --env-file-if-exists=.env.live node_modules/vitest/vitest.mjs run --config vitest.live.config.ts",
     "test:watch": "vitest",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",

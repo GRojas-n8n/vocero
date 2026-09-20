@@ -59,6 +59,54 @@ function bot(path, opts = {}) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Espera una CONDICIÓN observable en vez de un tiempo fijo. Un turno del
+ * agente tarda AGENT_COALESCE_MS (6 s) + lo que cueste el arranque en frío del
+ * servidor de desarrollo, que compila bajo demanda las rutas que toca el turno
+ * (ai-mock, webhook…: medido 15–18 s en total en frío, vs. los 9 s fijos que
+ * había — ver scripts/e2e-offer-slots-cold.mjs). Devuelve el valor truthy de
+ * `fn`, o null si vence `timeoutMs` (el check que sigue entonces falla con un
+ * mensaje claro en vez de comparar contra un estado a medias).
+ */
+async function waitFor(fn, { timeoutMs = 90_000, intervalMs = 250 } = {}) {
+  const t0 = Date.now();
+  for (;;) {
+    const v = await fn();
+    if (v) return v;
+    if (Date.now() - t0 > timeoutMs) return null;
+    await sleep(intervalMs);
+  }
+}
+
+/** Mensajes salientes de wa-mock hacia `to` (el envío del agente ya salió por el CRM). */
+async function outboundTo(to) {
+  return ((await api("/api/dev/wa-mock/outbox")).json?.outbox ?? []).filter(
+    (o) => o.to === to
+  );
+}
+
+/**
+ * Fin de un turno del agente que RESPONDE: aparece un mensaje saliente nuevo
+ * (por encima de `before`). Devuelve el nuevo total (o `before` si venció).
+ */
+async function waitTurn(to, before, opts) {
+  const n = await waitFor(async () => {
+    const len = (await outboundTo(to)).length;
+    return len > before ? len : 0;
+  }, opts);
+  return n ?? before;
+}
+
+/** El turno terminó en un cambio de estado de la conversación (p. ej. un traspaso). */
+async function waitConversation(to, pred, opts) {
+  return waitFor(async () => {
+    const c = ((await api("/api/conversations")).json?.conversations ?? []).find(
+      (x) => x.contact.phone === to
+    );
+    return c && pred(c) ? c : null;
+  }, opts);
+}
 const PN = "PN-E2E-1";
 // wa_message_id es UNIQUE y la ingesta dedupea en silencio (correcto para
 // reintentos reales de Meta): en una RE-CORRIDA contra la MISMA base, un
@@ -908,9 +956,18 @@ async function main() {
       waMessageId: `wamid.e2e.008.in.${RUN}.img`,
     }),
   });
-  await sleep(1600); // ingesta + descarga in-process del binario
-  const msgs6 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
-  const inImg = msgs6.find((m) => m.media?.caption === "foto de mi negocio");
+  // ingesta + descarga in-process del binario: se espera el DESENLACE (deja de
+  // estar `pending`), no 1.6 s fijos — en frío el servidor de desarrollo compila
+  // bajo demanda las rutas del wa-mock que toca la descarga (visto: `pending`).
+  const findInImg = async () => {
+    const msgs = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
+    return msgs.find((m) => m.media?.caption === "foto de mi negocio");
+  };
+  await waitFor(async () => {
+    const m = await findInImg();
+    return m && m.media?.fetchStatus && m.media.fetchStatus !== "pending" ? m : null;
+  });
+  const inImg = await findInImg();
   ok(
     "imagen entrante queda disponible tras la descarga in-process",
     inImg?.direction === "in" &&
@@ -1021,6 +1078,7 @@ async function main() {
   await assetsChecks();
   await projectsChecks();
   await aiChecks();
+  await aiFormatChecks();
 
   console.log(`\n===== ${checks - failures}/${checks} checks OK, ${failures} fallos =====`);
   process.exit(failures > 0 ? 1 : 0);
@@ -1091,6 +1149,184 @@ async function aiChecks() {
     "«Quitar» borra la fila: la instancia vuelve a las variables de entorno",
     (await api("/api/settings/ai")).json?.connection === null
   );
+}
+
+/* ============================================================
+ * 023 — Respuesta estructurada y recuperación segura del agente
+ * (tests/e2e/us-ai-formato.md), contra ai-mock.
+ * ============================================================ */
+
+async function aiFormatChecks() {
+  console.log(
+    "\n== 023: el modelo contesta en TEXTO PLANO o con formato inválido (agente real + ai-mock) =="
+  );
+  const stats = await api("/api/dev/ai-mock/stats");
+  if (!stats.res.ok) {
+    console.log("  (ai-mock sin contador: se omiten los checks de formato)");
+    return;
+  }
+  const FALLBACK_RE = /no pude procesar bien tu mensaje/i;
+
+  // El agente in-process se enciende sólo para esta sección (el resto del
+  // guion lo asume apagado para probar /api/bot/* en aislamiento).
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: true }),
+  });
+
+  const inbound = (from, text, n) =>
+    api("/api/dev/wa-mock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        phoneNumberId: PN,
+        from,
+        name: `Lead formato ${RUN}`,
+        text,
+        waMessageId: `wamid.e2e.023.${from}.${RUN}.${n}`,
+      }),
+    });
+  const lastTo = async (to) =>
+    ((await api("/api/dev/wa-mock/outbox")).json?.outbox ?? [])
+      .filter((o) => o.to === to)
+      .pop();
+  const countTo = async (to) =>
+    ((await api("/api/dev/wa-mock/outbox")).json?.outbox ?? []).filter(
+      (o) => o.to === to
+    ).length;
+  const convOf = async (to) =>
+    ((await api("/api/conversations")).json?.conversations ?? []).find(
+      (c) => c.contact.phone === to
+    );
+
+  // ── 1. El incidente: pregunta fuera de alcance → respuesta correcta en texto plano
+  const LEAD_TXT = `52146${RUN}05`;
+  const LEAD_TXT_NORM = LEAD_TXT.replace(/^521/, "52");
+  await api("/api/dev/ai-mock/stats", { method: "DELETE" });
+  await inbound(LEAD_TXT, "prueba:texto-plano ¿me ayudas con mi tarea de historia?", 1);
+  await waitTurn(LEAD_TXT_NORM, 0);
+
+  const callsTxt = (await api("/api/dev/ai-mock/stats")).json?.calls;
+  ok(
+    "texto plano: exactamente 2 llamadas al proveedor (turno + verificación), NO 3",
+    callsTxt === 2,
+    `calls=${callsTxt}`
+  );
+  const msgTxt = await lastTo(LEAD_TXT_NORM);
+  ok(
+    "texto plano: la respuesta útil de Max SÍ llega al cliente",
+    /solo me enfoco en temas de CRM/i.test(msgTxt?.body?.text?.body ?? ""),
+    JSON.stringify(msgTxt)
+  );
+  const convTxt = await convOf(LEAD_TXT_NORM);
+  ok(
+    "texto plano: sin traspaso (la IA sigue activa, sin handoff 'error')",
+    convTxt && !convTxt.handoffAt && !convTxt.handoffReason && convTxt.aiEnabled !== false,
+    JSON.stringify(convTxt && { h: convTxt.handoffAt, r: convTxt.handoffReason, ai: convTxt.aiEnabled })
+  );
+
+  // ── 2. Formato inválido AISLADO: degradación segura, sin escalar
+  const LEAD_BAD = `52146${RUN}06`;
+  const LEAD_BAD_NORM = LEAD_BAD.replace(/^521/, "52");
+  await api("/api/dev/ai-mock/stats", { method: "DELETE" });
+  await inbound(LEAD_BAD, "prueba:formato-invalido", 1);
+  await waitTurn(LEAD_BAD_NORM, 0);
+
+  const callsBad = (await api("/api/dev/ai-mock/stats")).json?.calls;
+  ok(
+    "formato inválido: 2 llamadas (turno + UNA corrección), NO 3",
+    callsBad === 2,
+    `calls=${callsBad}`
+  );
+  const msgBad = await lastTo(LEAD_BAD_NORM);
+  ok(
+    "formato inválido: el cliente recibe el mensaje fijo de degradación",
+    FALLBACK_RE.test(msgBad?.body?.text?.body ?? ""),
+    JSON.stringify(msgBad)
+  );
+  ok(
+    "formato inválido: el mensaje NO promete un humano",
+    !/humano|persona|asesor|compañero/i.test(msgBad?.body?.text?.body ?? "")
+  );
+  const convBad1 = await convOf(LEAD_BAD_NORM);
+  ok(
+    "formato inválido aislado: SIN handoff y con la IA activa",
+    convBad1 && !convBad1.handoffAt && convBad1.aiEnabled !== false,
+    JSON.stringify(convBad1 && { h: convBad1.handoffAt, r: convBad1.handoffReason })
+  );
+  const bookingsBad = (await api("/api/bookings")).json?.bookings ?? [];
+  ok(
+    "formato inválido: no se agendó nada",
+    !bookingsBad.some((b) => b.contact?.id === convBad1?.contact?.id)
+  );
+
+  // ── 3. El MISMO fallo dos turnos seguidos ya no es aislado → handoff 'error'
+  const antes = await countTo(LEAD_BAD_NORM);
+  await inbound(LEAD_BAD, "prueba:formato-invalido otra vez", 2);
+  // este turno NO responde: termina cuando el traspaso queda aplicado
+  await waitConversation(LEAD_BAD_NORM, (c) => Boolean(c.handoffAt));
+  const convBad2 = await convOf(LEAD_BAD_NORM);
+  ok(
+    "segundo fallo de formato consecutivo → handoff 'error'",
+    convBad2?.handoffReason === "error",
+    JSON.stringify(convBad2 && { h: convBad2.handoffAt, r: convBad2.handoffReason })
+  );
+  ok(
+    "…sin mandarle otro mensaje al cliente",
+    (await countTo(LEAD_BAD_NORM)) === antes
+  );
+
+  // ── 3b. El contador vive en la BASE y un turno exitoso lo reinicia:
+  //        fallo → éxito → fallo NO son consecutivos (no hay handoff).
+  const LEAD_RST = `52146${RUN}08`;
+  const LEAD_RST_NORM = LEAD_RST.replace(/^521/, "52");
+  await inbound(LEAD_RST, "prueba:formato-invalido", 1);
+  await waitTurn(LEAD_RST_NORM, 0);
+  ok(
+    "contador: 1er fallo → degradación sin handoff",
+    FALLBACK_RE.test((await lastTo(LEAD_RST_NORM))?.body?.text?.body ?? "") &&
+      !(await convOf(LEAD_RST_NORM))?.handoffAt
+  );
+  await inbound(LEAD_RST, "hola, ¿cuánto cuesta?", 2);
+  await waitTurn(LEAD_RST_NORM, 1);
+  ok(
+    "contador: un turno exitoso responde normal",
+    !FALLBACK_RE.test((await lastTo(LEAD_RST_NORM))?.body?.text?.body ?? "")
+  );
+  await inbound(LEAD_RST, "prueba:formato-invalido de nuevo", 3);
+  await waitTurn(LEAD_RST_NORM, 2);
+  const convRst = await convOf(LEAD_RST_NORM);
+  ok(
+    "contador: tras el éxito, el siguiente fallo vuelve a ser AISLADO (sin handoff)",
+    convRst && !convRst.handoffAt && convRst.aiEnabled !== false,
+    JSON.stringify(convRst && { h: convRst.handoffAt, r: convRst.handoffReason })
+  );
+
+  // ── 3c. Diagnóstico del modelo efectivo: sin ningún secreto
+  const eff = (await api("/api/settings/ai")).json?.effective;
+  ok(
+    "Ajustes → IA expone el modelo EFECTIVO y su fuente, sin credenciales",
+    typeof eff?.agent?.model === "string" &&
+      ["organization", "environment"].includes(eff?.agent?.source) &&
+      !/token|key|secret|sk-/i.test(JSON.stringify(eff)),
+    JSON.stringify(eff)
+  );
+
+  // ── 4. Camino feliz intacto: JSON válido → UNA llamada
+  const LEAD_OK = `52146${RUN}07`;
+  const LEAD_OK_NORM = LEAD_OK.replace(/^521/, "52");
+  await api("/api/dev/ai-mock/stats", { method: "DELETE" });
+  await inbound(LEAD_OK, "hola, ¿qué precio tiene?", 1);
+  await waitTurn(LEAD_OK_NORM, 0);
+  ok(
+    "JSON válido: una sola llamada y respuesta entregada",
+    (await api("/api/dev/ai-mock/stats")).json?.calls === 1 &&
+      typeof (await lastTo(LEAD_OK_NORM))?.body?.text?.body === "string"
+  );
+
+  await api("/api/agent/profile", {
+    method: "PUT",
+    body: JSON.stringify({ enabled: false }),
+  });
 }
 
 /* ============================================================
@@ -1484,13 +1720,14 @@ async function agendaChecks() {
     }),
   });
   // A diferencia de /api/bot/*, un inbound real pasa por el debounce de
-  // AGENT_COALESCE_MS (6000ms por defecto) antes de correr el turno.
-  const coalesceMs = Number(process.env.AGENT_COALESCE_MS ?? 6000);
-  await sleep(coalesceMs + 3000);
-
+  // AGENT_COALESCE_MS (6000ms por defecto) antes de correr el turno, y en
+  // frío el servidor de desarrollo compila las rutas del turno bajo demanda:
+  // se espera el MENSAJE (condición observable), no un tiempo fijo.
+  //
   // El envío sale al teléfono NORMALIZADO (521→52), no al `from` crudo del
   // inbound — mismo criterio que `convA`/`convB` más arriba.
   const LEAD_MAX_NORM = LEAD_MAX.replace(/^521/, "52");
+  let nMax = await waitTurn(LEAD_MAX_NORM, 0);
   const outboxMax = (await api("/api/dev/wa-mock/outbox")).json?.outbox ?? [];
   const msgMax = outboxMax.filter((o) => o.to === LEAD_MAX_NORM).pop();
   ok(
@@ -1532,7 +1769,7 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.015.max.${RUN}.2`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  nMax = await waitTurn(LEAD_MAX_NORM, nMax);
 
   const convsMax1 = (await api("/api/conversations")).json?.conversations ?? [];
   const convMax = convsMax1.find((c) => c.contact.phone === LEAD_MAX_NORM);
@@ -1564,7 +1801,12 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.015.max.${RUN}.3`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  // El turno termina cuando el traspaso YA está aplicado y el aviso salió.
+  await waitConversation(
+    LEAD_MAX_NORM,
+    (c) => c.handoffReason === "reprogramacion"
+  );
+  nMax = await waitTurn(LEAD_MAX_NORM, nMax);
 
   const convMaxTrasPedido = (
     (await api("/api/conversations")).json?.conversations ?? []
@@ -1596,7 +1838,7 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.015.max.${RUN}.4`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  nMax = await waitTurn(LEAD_MAX_NORM, nMax);
   await api("/api/dev/wa-mock/inbound", {
     method: "POST",
     body: JSON.stringify({
@@ -1607,7 +1849,7 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.015.max.${RUN}.5`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  nMax = await waitTurn(LEAD_MAX_NORM, nMax);
 
   const bookingsTrasMax2 = (await api("/api/bookings")).json?.bookings ?? [];
   const activasMax2 = bookingsTrasMax2.filter(
@@ -1665,7 +1907,8 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.notas.${RUN}.1`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  // cada turno de update_lead responde «Anotado…»: ése es su fin observable
+  await waitTurn(LEAD_NOTAS_NORM, 0);
 
   const contactoNotas = (
     (await api("/api/conversations")).json?.conversations ?? []
@@ -1701,7 +1944,8 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.notas.${RUN}.2`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  // cada turno de update_lead responde «Anotado…»: ése es su fin observable
+  await waitTurn(LEAD_NOTAS_NORM, 1);
 
   detalleNotas = (await api(`/api/contacts/${contactoNotas?.id}`)).json;
   ok(
@@ -1722,7 +1966,8 @@ async function agendaChecks() {
       waMessageId: `wamid.e2e.notas.${RUN}.3`,
     }),
   });
-  await sleep(coalesceMs + 3000);
+  // cada turno de update_lead responde «Anotado…»: ése es su fin observable
+  await waitTurn(LEAD_NOTAS_NORM, 2);
 
   detalleNotas = (await api(`/api/contacts/${contactoNotas?.id}`)).json;
   const notaConflicto = detalleNotas?.aiNotes?.find(
