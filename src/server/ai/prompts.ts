@@ -6,6 +6,21 @@ type KbEntry = typeof schema.kbEntry.$inferSelect;
 /** Marcador del prompt del juez: el ai-mock lo usa para despachar veredictos. */
 export const JUDGE_MARKER = "[JUEZ]";
 
+/**
+ * Marcador del bloque de contrato + reglas duras del prompt del agente (todo
+ * lo que viene DESPUÉS del conocimiento del negocio). La recuperación de texto
+ * plano (spec 023) lo usa para detectar que el modelo esté recitando sus
+ * instrucciones: el KB queda fuera a propósito — citarlo es responder.
+ */
+export const ACTION_CONTRACT_MARKER =
+  "En cada turno respondes ÚNICAMENTE un objeto JSON con UNA acción:";
+
+/** El bloque de contrato + reglas de un prompt armado con `buildAgentSystemPrompt`. */
+export function rulesBlockOf(prompt: string): string {
+  const at = prompt.indexOf(ACTION_CONTRACT_MARKER);
+  return at === -1 ? "" : prompt.slice(at);
+}
+
 export function renderKb(entries: KbEntry[]): string {
   if (entries.length === 0) return "(knowledge base vacío)";
   return entries
@@ -82,7 +97,7 @@ export function buildAgentSystemPrompt(input: {
     `Etapas del pipeline disponibles: ${stageNames}`,
     ...offersBlock,
     [
-      "En cada turno respondes ÚNICAMENTE un objeto JSON con UNA acción:",
+      ACTION_CONTRACT_MARKER,
       '- {"action":"none"} — no responder nada.',
       '- {"action":"reply","text":"..."} — responder al cliente.',
       '- {"action":"update_lead","note":"...","scenario":"...","reply":"..."} — guardar UN hecho nuevo y concreto que el cliente acaba de confirmar (reply opcional). `note` es una frase corta, nunca un resumen de todo lo hablado. `scenario` es el giro/tema breve de ese hecho (p. ej. "plomería", "clínica dental") — inclúyelo cuando el cliente hable de un negocio/tema concreto.',

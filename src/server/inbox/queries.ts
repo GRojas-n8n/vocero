@@ -193,6 +193,10 @@ export async function updateConversation(
     set.handoffAt = null;
     set.handoffReason = null;
     set.aiEnabled = patch.aiEnabled ?? true;
+    // 023: reactivar la IA empieza de cero el conteo de fallos consecutivos.
+    set.aiFailCount = 0;
+    set.aiFailKind = null;
+    set.aiFailAt = null;
   }
   if (patch.markRead) set.unreadCount = 0;
 

@@ -1,4 +1,5 @@
 import { JUDGE_MARKER } from "@/server/ai/prompts";
+import { RECOVERY_MARKER } from "@/server/ai/recovery";
 
 /**
  * Proveedor LLM determinista para el self-test (contrato mocks.md).
@@ -29,7 +30,21 @@ function isTranscriptionRequest(content: unknown): boolean {
   );
 }
 
+/** Prefijo del mensaje de corrección por esquema que arma `lib/ai` (spec 023). */
+const CORRECTION_PREFIX = "Tu respuesta anterior es JSON pero no cumple el esquema";
+
+const globalForMock = globalThis as unknown as { __aiMockCalls?: number };
+
+/** 023: contador de llamadas recibidas (evidencia del self-test: "no hay 3 cargos"). */
+export function aiMockStats(): { calls: number } {
+  return { calls: globalForMock.__aiMockCalls ?? 0 };
+}
+export function resetAiMockStats(): void {
+  globalForMock.__aiMockCalls = 0;
+}
+
 export function aiMockCompletion(messages: InMessage[]): string {
+  globalForMock.__aiMockCalls = (globalForMock.__aiMockCalls ?? 0) + 1;
   const lastUserMsg = [...messages].reverse().find((m) => m.role === "user");
   // 018: transcripción de audio — determinista, sin decodificar el audio real.
   if (lastUserMsg && isTranscriptionRequest(lastUserMsg.content)) {
@@ -68,6 +83,35 @@ export function aiMockCompletion(messages: InMessage[]): string {
       });
     }
     return JSON.stringify({ veredicto: "verde", hallazgos: [] });
+  }
+
+  // 023 — Recuperación de texto plano: el verificador devuelve el borrador
+  // tal cual (como lo haría un modelo obediente), para que el self-test pueda
+  // recorrer el camino completo.
+  if (system.includes(RECOVERY_MARKER)) {
+    const draft = lastUser.match(/<borrador>\n([\s\S]*)\n<\/borrador>/)?.[1];
+    return JSON.stringify(
+      draft ? { action: "reply", text: draft } : { action: "none" }
+    );
+  }
+
+  // 023 — Disparadores deterministas de salida defectuosa del modelo. La
+  // llamada correctiva por esquema llega con un mensaje de `user` que empieza
+  // por CORRECTION_PREFIX: el disparador se busca en el mensaje anterior.
+  const userTexts = messages
+    .filter((m) => m.role === "user")
+    .map((m) => flattenContent(m.content));
+  const isCorrection = lastUser.startsWith(CORRECTION_PREFIX);
+  const trigger = (isCorrection ? userTexts.at(-2) : lastUser) ?? "";
+  // Incidente 2026-09: pregunta fuera de alcance → respuesta correcta pero en
+  // TEXTO PLANO, sin JSON.
+  if (/^prueba:texto-plano\b/i.test(trigger)) {
+    return "Solo me enfoco en temas de CRM. Si quieres, seguimos con la demostración.";
+  }
+  // JSON válido pero con una acción que el esquema no admite: ni el intento
+  // principal ni la corrección lo arreglan → formato irrecuperable.
+  if (/^prueba:formato-invalido\b/i.test(trigger)) {
+    return JSON.stringify({ action: "book_slot" });
   }
 
   const text = lastUser.toLowerCase();

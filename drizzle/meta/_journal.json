@@ -155,6 +155,13 @@
       "when": 1789671608773,
       "tag": "0021_curvy_photon",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "7",
+      "when": 1789909551118,
+      "tag": "0022_ia_estado_de_fallos",
+      "breakpoints": true
     }
   ]
 }
