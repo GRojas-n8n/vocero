@@ -162,6 +162,13 @@
       "when": 1789909551118,
       "tag": "0022_ia_estado_de_fallos",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1789958233209,
+      "tag": "0023_entrega_integra_saliente",
+      "breakpoints": true
     }
   ]
 }

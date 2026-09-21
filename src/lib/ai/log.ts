@@ -15,7 +15,8 @@ export type AiLogEvent = {
     | "turn_outcome"
     | "circuit_open"
     | "circuit_blocked"
-    | "circuit_closed";
+    | "circuit_closed"
+    | "action_guard";
   /** Identificador interno correlacionable (id de conversación), nunca PII. */
   traceId?: string;
   /** Id interno de la organización (nunca su nombre ni datos de contacto). */

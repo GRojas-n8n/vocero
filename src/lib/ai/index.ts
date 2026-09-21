@@ -94,6 +94,13 @@ export type ChatJsonOptions = {
    * acotar el gasto.
    */
   maxTokens?: number;
+  /**
+   * Normalización de la respuesta YA parseada y sin `null`, ANTES de validarla con
+   * el esquema. En modo estricto el proveedor rellena todos los campos y un modelo
+   * pequeño usa `""`/`[]`/un valor de enum plausible donde debería ir «ausente»:
+   * sin esto, un `edge:""` no pasaría el enum y costaría una llamada correctiva.
+   */
+  normalize?: (value: unknown) => unknown;
 };
 
 /** Sub-límites por clase; el presupuesto global (`budget`) manda sobre todos. */
@@ -607,7 +614,8 @@ export async function chatJson<T>(
       if (extracted === null) {
         invalid = { code: "invalid_json" };
       } else {
-        const parsed = schema.safeParse(stripNulls(extracted));
+        const cleaned = stripNulls(extracted);
+        const parsed = schema.safeParse(opts?.normalize ? opts.normalize(cleaned) : cleaned);
         if (parsed.success) {
           finish("info", served, "ok");
           return { ok: true, data: parsed.data, raw: content, meta };

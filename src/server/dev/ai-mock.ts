@@ -1,4 +1,5 @@
-import { JUDGE_MARKER } from "@/server/ai/prompts";
+import { AGENDA_PRIORITY_MARKER, JUDGE_MARKER } from "@/server/ai/prompts";
+import { extractTemporalQuery } from "@/server/agenda/query-intent";
 import { RECOVERY_MARKER } from "@/server/ai/recovery";
 
 /**
@@ -41,6 +42,38 @@ export function aiMockStats(): { calls: number } {
 }
 export function resetAiMockStats(): void {
   globalForMock.__aiMockCalls = 0;
+}
+
+/**
+ * 025 — Extrae de la frase del cliente los parámetros de `check_availability`.
+ * Sólo reconoce un puñado de formas de prueba (`consulta:` no hace falta): el
+ * self-test las usa para ejercitar el camino real de punta a punta.
+ */
+function mockAvailabilityQuery(
+  text: string
+): { day?: string; times?: string[]; from?: string; to?: string; edge?: "earliest" | "latest" } | null {
+  const day = text.match(/\b(hoy|ma[nñ]ana|pasado ma[nñ]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/)?.[1];
+  if (/\b(m[aá]s tarde|[uú]ltimo horario)\b/.test(text)) {
+    return { ...(day ? { day } : {}), edge: "latest" };
+  }
+  if (/\b(m[aá]s temprano|primer horario)\b/.test(text)) {
+    return { ...(day ? { day } : {}), edge: "earliest" };
+  }
+  // «a las 4 o 5 de la tarde», «a las 11 o 12»
+  const hours = text.match(/\ba las (\d{1,2})(?::(\d{2}))?(?: o (\d{1,2})(?::(\d{2}))?)?( de la (?:tarde|ma[nñ]ana|noche))?/);
+  if (hours && day) {
+    const suffix = hours[5] ?? "";
+    const times = [`${hours[1]}${hours[2] ? `:${hours[2]}` : ""}${suffix}`];
+    if (hours[3]) times.push(`${hours[3]}${hours[4] ? `:${hours[4]}` : ""}${suffix}`);
+    return { day, times };
+  }
+  // «más horarios mañana», «qué horarios hay el lunes»
+  if (day && /\bhorarios?\b/.test(text)) return { day };
+  // Expresión que el servidor NO soporta («la semana que viene»): el modelo la pasa
+  // tal cual y es el servidor quien pide la aclaración (spec 025 §5.2).
+  const week = text.match(/\b(la )?semana (que viene|pr[oó]xima|siguiente)\b/);
+  if (week) return { day: week[0] };
+  return null;
 }
 
 export function aiMockCompletion(messages: InMessage[]): string {
@@ -184,6 +217,22 @@ export function aiMockCompletion(messages: InMessage[]): string {
       startUtc: offeredStarts[0],
       reply: "¡Perfecto! Te confirmo tu cita.",
     });
+  }
+  // 025 (rev. correctiva) — Un perfil HEREDADO que dice «usa offer_slots» arrastra al
+  // modelo a ofrecer horarios aunque el cliente haya pedido un día/hora/rango. El
+  // mock lo simula (sólo si esa regla está en las instrucciones DEL NEGOCIO, no en
+  // las reglas del sistema) para ejercitar de punta a punta la compuerta del servidor.
+  const businessInstructions =
+    system.split("Instrucciones del negocio:")[1]?.split(AGENDA_PRIORITY_MARKER)[0] ?? "";
+  if (/usa\s+offer_slots/i.test(businessInstructions) && extractTemporalQuery(lastUser).hasTemporal) {
+    return JSON.stringify({ action: "offer_slots", reply: "Claro, aquí tienes algunos horarios:" });
+  }
+  // 025 — Consulta DIRECTA de disponibilidad (día / hora / rango / extremo):
+  // dispara `check_availability` con las palabras del cliente, igual que lo haría
+  // el modelo real. Va antes del offer_slots genérico (que también matchea "horario").
+  const availabilityQuery = mockAvailabilityQuery(text);
+  if (availabilityQuery) {
+    return JSON.stringify({ action: "check_availability", ...availabilityQuery });
   }
   if (/agendar|\bcita\b|horario/.test(text)) {
     return JSON.stringify({

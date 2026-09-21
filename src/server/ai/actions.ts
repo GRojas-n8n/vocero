@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { normalizeAgentActionInput } from "@/server/agenda/query-intent";
 
 /**
  * Acción tipada del agente: exactamente UNA por turno (FR-021).
@@ -77,6 +78,24 @@ const agendaActions = [
      */
     confirmAdditional: z.boolean().optional(),
   }),
+  /**
+   * 025 — CONSULTA DIRECTA de disponibilidad. El modelo pasa lo que dijo el
+   * prospecto (día, hora, rango o «el más tarde»); el servidor resuelve las
+   * fechas y horas y responde con el motor evaluado sobre TODO lo pedido. Sin
+   * `reply` a propósito: el modelo no redacta (ni afirma) nada sobre horarios.
+   */
+  z.object({
+    action: z.literal("check_availability"),
+    /** "mañana", "lunes", "25 de septiembre" o ISO. Omitido = todo el horizonte. */
+    day: z.string().optional(),
+    /** Horas concretas, tal como las dijo: ["11", "12"], ["4 de la tarde"]. */
+    times: z.array(z.string()).optional(),
+    /** Rango: "entre las 3 y las 5 pm" → from "3 pm", to "5 pm". */
+    from: z.string().optional(),
+    to: z.string().optional(),
+    /** «el más tarde» / «el más temprano». */
+    edge: z.enum(["earliest", "latest"]).optional(),
+  }),
   z.object({
     action: z.literal("request_reschedule"),
     reply: z.string().optional(),
@@ -123,11 +142,22 @@ export function degradeAction(action: AgentActionType): AgentActionType {
     action.action === "move_stage" ||
     action.action === "offer_slots" ||
     action.action === "book_slot" ||
+    action.action === "check_availability" ||
     action.action === "request_reschedule"
   ) {
+    // `check_availability` no lleva `reply`: si el motor falla, el pipeline
+    // responde con un texto fijo (nunca una afirmación sobre horarios).
+    if (action.action === "check_availability") return { action: "none" };
     return action.reply
       ? { action: "reply", text: action.reply }
       : { action: "none" };
   }
   return action;
 }
+
+/**
+ * Se aplica a la respuesta cruda del modelo ANTES de validar el esquema (opción
+ * `normalize` de `chatJson`): `""`, espacios y `[]` de `check_availability` son
+ * AUSENCIA. Ver `src/server/agenda/query-intent.ts`.
+ */
+export const normalizeAgentAction = normalizeAgentActionInput;

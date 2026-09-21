@@ -1,5 +1,8 @@
 # 023 — Respuesta estructurada y recuperación segura del agente
 
+> Ver también [024](../024-entrega-integra-mensajes-salientes/spec.md): qué pasa cuando **Meta** no acepta un
+> mensaje ya armado (esta spec trata del formato que devuelve *el modelo*; no se solapan).
+
 **Carril**: ciclo completo (Principio VI). La primera versión era carril ligero;
 la revisión preproducción (rev. 2, 2026-09-20) añadió la migración `0022`
 (estado técnico de fallos por conversación), lo que obliga al ciclo completo:
