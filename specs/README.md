@@ -15,6 +15,8 @@ producto** — y saberlo antes de leerla ahorra una confusión.
 | `016-atribucion-capi` | Ciclo completo | spec, plan, research, data-model, 2 contratos, quickstart, checklist, tasks |
 | `017-canal-messenger` | Ciclo completo | spec (sobre los cimientos de 014: mismo adaptador-por-canal y bandera) |
 | `023-respuesta-estructurada-agente` | Ciclo completo | spec, plan, data-model, tasks (incidente: texto plano descartado → 3 llamadas + handoff `error`; rev. 2 añadió la migración 0022) |
+| `024-entrega-integra-mensajes-salientes` | Ciclo completo | spec, plan, data-model, tasks (incidente: `offer_slots` rechazado por Meta → llegó sólo la introducción; migración 0023 + outbox sobre `message`; complementa —no modifica— a 023; §5.6-5.7 añaden la revalidación y el guard de ofertas, incluida la re-oferta de `bookSlot` de la 015) |
+| `025-consultas-disponibilidad-calendario` | Ciclo completo | spec, plan, data-model (sin migración), tasks (defecto: el agente infería «no hay» de una lista truncada — 12 de 97 horarios libres —; acción `check_availability`, metadatos `exhaustive`/`hasMore`, alternativas cercanas, API del cerebro externo; se apoya en 024 §5.6-5.7 y `registerAlternatives` sin modificarlos) |
 
 Los tres carriles —ciclo completo, ligero y exento— están definidos en el
 [Principio VI de la constitución](../.specify/memory/constitution.md). El

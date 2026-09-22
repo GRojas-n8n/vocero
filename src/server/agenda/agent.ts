@@ -2,7 +2,12 @@ import { appBaseUrl } from "@/lib/env";
 import { computeAvailability } from "@/server/agenda/availability";
 import { getSettings } from "@/server/agenda/settings";
 import { pickAcrossDays, spreadByDay } from "@/server/agenda/spread";
-import { replaceOffers } from "@/server/agenda/offers";
+import type { OfferedSlot } from "@/server/agenda/offers";
+import {
+  queryAvailability,
+  type AvailabilityMeta,
+  type AvailabilityQuery,
+} from "@/server/agenda/availability-query";
 import {
   BookingError,
   createSessionBooking,
@@ -41,6 +46,10 @@ export type AgendaTurnStatus =
   | "reschedule_pending"
   | "slot_taken"
   | "not_offered"
+  /** 025 — respuesta a una consulta directa de disponibilidad. */
+  | "availability"
+  /** 025 — la consulta no se pudo interpretar: se pregunta, no se afirma nada. */
+  | "availability_clarify"
   | "error";
 
 export type AgendaTurn = {
@@ -49,6 +58,19 @@ export type AgendaTurn = {
   /** false ⇒ el motor no pudo; el turno sigue, sin agendar. */
   ok: boolean;
   status: AgendaTurnStatus;
+  /**
+   * 024 — Los horarios REGISTRABLES que este texto muestra (el catálogo, más
+   * ancho que el menú). NO se escriben aquí: quien envía el mensaje los
+   * persiste junto con él y quedan `pending` hasta que Meta lo acepta, porque
+   * un horario "ofrecido" que el prospecto nunca vio no es seleccionable.
+   */
+  offers?: OfferedSlot[];
+  /**
+   * 025 — ¿La lista que se le mostró al prospecto es parcial o completa?
+   * (`exhaustive`, `hasMore`, `total`…). Nadie debe deducir «no hay» de una lista
+   * que declara `hasMore`.
+   */
+  availability?: AvailabilityMeta;
 };
 
 export async function offerSlots(input: {
@@ -77,24 +99,75 @@ export async function offerSlots(input: {
       text:
         input.intro?.trim() ||
         "Por ahora no me quedan horarios libres. Déjame confirmarlo con el equipo y te aviso.",
+      // El horizonte se evaluó COMPLETO y no hay nada: aquí sí es una negación honesta.
+      availability: {
+        kind: "suggestions",
+        scopeComplete: true,
+        exhaustive: true,
+        hasMore: false,
+        total: 0,
+        conveyed: 0,
+      },
     };
   }
 
   // Se REGISTRA todo el catálogo, no solo lo que se enseña: si el cliente pide
-  // otro día, el agente tiene alternativas legítimas que aceptar.
-  await replaceOffers(
-    input.organizationId,
-    input.conversationId,
-    spread.map((s) => ({ startUtc: s.startUtc, label: s.label }))
-  );
-
+  // otro día, el agente tiene alternativas legítimas que aceptar. (024: el
+  // registro lo hace el envío, ligado al mensaje; aquí sólo se calcula.)
   // `spread` ya viene agrupado por día en orden cronológico: tomar los
   // primeros SHOWN a secas mostraría solo el primer día si ese día por sí
   // solo llena el menú. `pickAcrossDays` reparte por variedad primero.
   const shown = pickAcrossDays(spread, SHOWN);
+  // `shown` marca lo que el TEXTO enseña: es lo único que se revalida si el
+  // mensaje hay que reenviarlo (spec 024 §5.6).
+  const shownStarts = new Set(shown.map((s) => s.startUtc));
+  const offers = spread.map((s) => ({
+    startUtc: s.startUtc,
+    label: s.label,
+    shown: shownStarts.has(s.startUtc),
+  }));
   const lista = shown.map((s) => `• ${s.dayLabel} a las ${s.time}`).join("\n");
   const intro = input.intro?.trim() || "Tengo estos horarios disponibles:";
-  return { ok: true, status: "offered", text: `${intro}\n${lista}` };
+  return {
+    ok: true,
+    status: "offered",
+    text: `${intro}\n${lista}`,
+    offers,
+    // Son SUGERENCIAS, no la agenda: `total` es la cuenta completa del horizonte
+    // y `hasMore` avisa que hay más de lo que se enseña (025 §4).
+    availability: {
+      kind: "suggestions",
+      scopeComplete: true,
+      exhaustive: all.length <= shown.length,
+      hasMore: all.length > shown.length,
+      total: all.length,
+      conveyed: shown.length,
+    },
+  };
+}
+
+/**
+ * 025 — Consulta DIRECTA: el prospecto indicó un día, una hora o un rango. La
+ * respuesta sale del motor evaluado sobre todo lo pedido (no de las primeras
+ * opciones mostradas) y NO escribe nada: devuelve el texto y los horarios, que
+ * `sendText` persiste `pending` con el mensaje (024 §5.6).
+ */
+export async function checkAvailability(input: {
+  organizationId: string;
+  conversationId: string;
+  query: AvailabilityQuery;
+}): Promise<AgendaTurn> {
+  const answer = await queryAvailability({
+    organizationId: input.organizationId,
+    query: input.query,
+  });
+  return {
+    ok: answer.ok,
+    status: answer.status,
+    text: answer.text,
+    offers: answer.offers.length > 0 ? answer.offers : undefined,
+    availability: answer.meta,
+  };
 }
 
 export async function bookSlot(input: {
@@ -120,6 +193,9 @@ export async function bookSlot(input: {
       requireOffer: true,
       notes: input.reason?.trim() || null,
       allowAdditional: input.confirmAdditional === true,
+      // 024 §5.7: si el hueco se ocupó, las alternativas NO se registran aquí
+      // como `active`: viajan con el mensaje (`turn.offers`) y quedan `pending`.
+      registerAlternatives: false,
     });
 
     const base =
@@ -184,10 +260,27 @@ export async function bookSlot(input: {
         err.code === "slot_taken"
           ? "Se me acaba de ocupar ese horario, ¡perdón!"
           : "Déjame confirmarte los horarios que tengo:";
+      // Mismo contrato que `offer_slots` (spec 024 §5.6): el mensaje lleva sus
+      // horarios; `shown` marca los que el TEXTO enseña (los primeros SHOWN).
+      const offers = err.slots.map((s, i) => ({
+        startUtc: s.startUtc,
+        label: s.label,
+        shown: i < SHOWN,
+      }));
       return {
         ok: false,
         status: err.code === "slot_taken" ? "slot_taken" : "not_offered",
         text: `${disculpa}\n${lista}`,
+        offers,
+        // Alternativas cercanas: una muestra, no la agenda.
+        availability: {
+          kind: "suggestions",
+          scopeComplete: false,
+          exhaustive: false,
+          hasMore: true,
+          total: err.slots.length,
+          conveyed: Math.min(err.slots.length, SHOWN),
+        },
       };
     }
     return {

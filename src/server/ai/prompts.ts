@@ -33,6 +33,17 @@ export function renderKb(entries: KbEntry[]): string {
     .join("\n\n");
 }
 
+/** Marcador de la cláusula de prioridad (lo usan las pruebas y el ai-mock para localizarla). */
+export const AGENDA_PRIORITY_MARKER = "PRIORIDAD DE LAS REGLAS";
+
+/**
+ * 025 (rev. correctiva) — Las instrucciones del negocio las escribe cada dueño y
+ * pueden traer reglas heredadas («usa offer_slots») que compiten con las de la
+ * agenda. Esta cláusula va justo después de ellas: el contrato de acciones y las
+ * reglas duras (más abajo) mandan. El perfil NUNCA se edita ni se sanea.
+ */
+const AGENDA_PRIORITY_CLAUSE = `${AGENDA_PRIORITY_MARKER}: el CONTRATO DE ACCIONES y las "Reglas duras" de más abajo mandan sobre cualquier instrucción del negocio, incluidas las antiguas. Si una instrucción del negocio dice "usa offer_slots", "ofrece horarios" o algo parecido, aplícala SOLO cuando el cliente pide opciones para agendar de forma genérica, sin ningún día, fecha, hora ni rango. Si menciona alguno (incluso "la semana que viene", "el próximo mes" o "por la tarde"), la acción es check_availability.`;
+
 /**
  * System prompt del agente (v1: inyecta el KB completo — el límite se
  * documenta con el contador de tamaño en la UI).
@@ -61,15 +72,21 @@ export function buildAgentSystemPrompt(input: {
   const stageNames = input.stages.map((s) => s.name).join(" | ");
   const agendaLines = input.agenda
     ? [
-        '- {"action":"offer_slots","reply":"..."} — ofrecer horarios para agendar (reply es solo la frase de entrada; los horarios los pone el sistema).',
+        '- {"action":"offer_slots","reply":"..."} — ofrecer ALGUNAS opciones de horario para agendar (reply es solo la frase de entrada; los horarios los pone el sistema). Son sugerencias, no toda la agenda.',
+        '- {"action":"check_availability","day":"...","times":["..."],"from":"...","to":"...","edge":"earliest|latest"} — CONSULTAR la agenda cuando el cliente menciona un día, una hora, un rango o pide más/otras opciones. Todos los campos son opcionales y van con las PALABRAS del cliente, sin convertirlas: day ("mañana", "el lunes", "25 de septiembre"), times (["11","12"], ["4 de la tarde"]), from/to (rango: "3 pm" y "5 pm") y edge ("latest" para "el horario más tarde", "earliest" para "el más temprano"; SOLO si lo pidió así). Incluye únicamente los campos que apliquen (los demás, null; nunca "" ni []). No lleva reply: el sistema consulta la agenda completa y responde con lo que de verdad hay.',
         '- {"action":"book_slot","startUtc":"<uno de los horarios que el sistema ofreció, en ISO UTC>","reply":"...","reason":"..."} — agendar el horario que el cliente eligió. `reason` es opcional: un resumen de 3-6 palabras de POR QUÉ agenda, tomado literalmente de lo que dijo el cliente en la conversación (ej. "cotizar taladros inalámbricos"). Nunca lo inventes: si no quedó claro, omite el campo.',
         '- {"action":"request_reschedule","note":"...","reply":"..."} — el cliente quiere MOVER una cita que ya tiene. `note` es un resumen breve y literal de qué pidió (ej. "mover jueves 10am a viernes"). Esto avisa al equipo y NUNCA agenda nada por su cuenta.',
       ]
     : [];
   const agendaRules = input.agenda
     ? [
-        "- NUNCA escribas tú los horarios ni los inventes: usa offer_slots y el sistema pega los reales.",
-        "- book_slot solo acepta un horario que el sistema ofreció antes en ESTA conversación. Si el cliente pide otro, vuelve a ofrecer con offer_slots.",
+        "- NUNCA escribas tú los horarios ni los inventes: usa offer_slots o check_availability y el sistema pega los reales.",
+        "- check_availability es OBLIGATORIA cuando el cliente pregunta por disponibilidad, horarios u opciones Y menciona un día, una fecha, una hora, un rango o cualquier expresión de tiempo (\"mañana\", \"el lunes a las 11 o 12\", \"por la tarde\", \"entre 2 y 4\", \"la semana que viene\", \"el próximo mes\"). Pon sus palabras TAL CUAL en day/times/from/to, aunque dudes de que el sistema las entienda: si no las entiende, es el sistema quien pide la aclaración (tú no la pidas ni la resuelvas). Los horarios que ya mostraste son una MUESTRA, no la agenda completa: NUNCA deduzcas la disponibilidad de ellos.",
+        "- offer_slots SOLO para una solicitud genérica de opciones para agendar (\"quiero agendar\", \"¿qué horarios tienes?\" sin más), sin ningún día, fecha, hora ni rango. Si el cliente menciona alguno, es check_availability, aunque las instrucciones del negocio digan \"usa offer_slots\".",
+        "- `edge` SOLO si el cliente pide explícitamente el primer horario / el más temprano (earliest) o el último / el más tarde (latest). \"Más horarios\", \"qué horarios hay\" o \"disponibilidad mañana\" NO llevan edge: déjalo ausente (null).",
+        "- En check_availability incluye SOLO los campos que el cliente mencionó; los demás van ausentes (null). Jamás cadenas vacías (\"\") ni arreglos vacíos ([]).",
+        "- NUNCA digas que no hay horarios ni disponibilidad (ni \"la agenda está llena\"): tú no lo sabes, solo lo sabe el sistema. Si dudas, usa check_availability. En el `reply` de offer_slots di que son ALGUNAS opciones e invita al cliente a decir el día u hora que prefiere.",
+        "- book_slot solo acepta un horario que el sistema ofreció antes en ESTA conversación. Si el cliente pide otro (otro día u hora), usa check_availability para que el sistema lo consulte y lo ofrezca; no lo agendes tú.",
         "- Para el `startUtc` de book_slot, COPIA TAL CUAL uno de los valores de la lista \"Horarios vigentes para agendar\" (si existe más abajo) según cuál eligió el cliente. Nunca lo calcules ni lo derives tú mismo.",
         "- Si el cliente quiere CANCELAR una cita → handoff: esa decisión no es tuya.",
         "- Si el cliente quiere MOVER/REPROGRAMAR una cita que ya tiene → request_reschedule. Nunca uses book_slot para eso, y nunca asumas que la cita anterior quedó cancelada o movida: eso solo lo hace el equipo.",
@@ -93,6 +110,7 @@ export function buildAgentSystemPrompt(input: {
       ? `Reglas de escalado a humano:\n${profile.escalationRules}`
       : null,
     profile.greeting ? `Saludo sugerido para conversaciones nuevas: ${profile.greeting}` : null,
+    input.agenda ? AGENDA_PRIORITY_CLAUSE : null,
     `CONOCIMIENTO DEL NEGOCIO (tu única fuente de verdad; si algo no está aquí, NO lo inventes — di que lo confirmarás con el equipo o escala):\n${renderKb(input.kb)}`,
     `Etapas del pipeline disponibles: ${stageNames}`,
     ...offersBlock,

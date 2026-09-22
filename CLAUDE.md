@@ -36,7 +36,9 @@ externas: el trabajo en segundo plano (agente, Laboratorio) es in-process.
 | El canal WhatsApp (Graph API) | `src/lib/meta/` (cliente único) + `src/server/whatsapp/` |
 | Los canales opcionales (Instagram, Messenger; ADR-001) | `src/lib/channels.ts` (catálogo) · `src/server/channels/` (capacidades y bandera `CHANNELS`) · `src/server/instagram/` · `src/server/messenger/` · `src/server/zernio/` (transporte y firma de la API unificada, compartido) |
 | Campos/tablas | `src/lib/db/schema.ts` → `pnpm db:generate` → migración nueva en `drizzle/` |
+| Qué disponibilidad ve y afirma el agente (consultas por día/hora/rango, listas parciales vs completas) | `src/server/agenda/availability-query.ts` (`answerQuery` pura) + `src/lib/time/day-expressions.ts` + `alternatives.ts` — spec [025](specs/025-consultas-disponibilidad-calendario/spec.md). El motor (`computeAvailability`) es la única fuente de verdad; **nunca** se afirma «no hay» sobre una lista truncada (`exhaustive`/`hasMore`) |
 | La ingesta/envío de mensajes | `src/server/inbox/` (ingest idempotente, send con guard de sandbox, ventana 24h) |
+| Qué pasa cuando Meta rechaza o no responde un envío (reintentos, estados, reenvío) | `src/server/outbox/` (`policy.ts` clasifica por CÓDIGO de Meta + etapa; `index.ts` encola, reclama e intenta) — spec [024](specs/024-entrega-integra-mensajes-salientes/spec.md). El payload se persiste ANTES del primer intento y no cambia: un reintento **jamás** llama a IA, pipeline ni agenda |
 | Cómo se identifica a un contacto | `src/server/inbox/identity.ts` (teléfono normalizado o `bsuid:<id>`) |
 | Conectar TU propio bot en vez del agente | `src/app/api/bot/*` + `src/server/bot/auth.ts` (X-API-Key) |
 | La agenda (horarios, huecos, citas) | `src/server/agenda/` — detrás de la bandera `AGENDA` (`flag.ts`) |
@@ -105,9 +107,10 @@ defecto | `json_schema` | `json_object` | `off`) y `AI_FALLBACK_MESSAGE` (mensaj
 fijo de degradación cuando el modelo no entrega una respuesta utilizable). Un
 turno del agente hace ≤ 3 llamadas al proveedor (presupuesto compartido); no
 bajes de `response_format` ante un 400 genérico (ver `rejection.ts`). Todo
-esquema enviado al proveedor se registra en `src/server/ai/schemas.ts`. La
-prueba real contra OpenRouter (`pnpm test:ai-live`) consume saldo: nunca la
-corras sin autorización expresa. Los
+esquema enviado al proveedor se registra en `src/server/ai/schemas.ts`. Las
+pruebas reales contra OpenRouter (`pnpm test:ai-live`, y `pnpm test:ai-live-025` para
+las consultas de disponibilidad) consumen saldo: nunca las corras sin autorización
+expresa (y con el tope de llamadas que traen). Los
 logs de IA (`src/lib/ai/log.ts`) llevan sólo datos operativos: jamás contenido
 del cliente ni del modelo — no agregues `raw`/`detail` con texto del modelo.
 
@@ -136,8 +139,13 @@ corrige y re-verifica tú mismo hasta verde (loop de auto-corrección).
 Gate técnico:
 
 ```bash
-pnpm typecheck && pnpm lint && pnpm build && pnpm test
+pnpm typecheck && pnpm lint && pnpm build && pnpm test && pnpm test:integration
 ```
+
+`pnpm test:integration` (spec 024) corre el pipeline, la ingesta, el outbox y las
+migraciones contra un Postgres REAL (una base `vocero_it_*` desechable por
+archivo, creada y borrada en el servidor de `DATABASE_URL`); sólo Meta, la IA y
+la disponibilidad están simuladas.
 
 Guiones E2E por historia en `tests/e2e/*.md`. Parte de ellos ya están
 automatizados: con la app viva y los mocks encendidos, `pnpm test:e2e`

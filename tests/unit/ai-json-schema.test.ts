@@ -63,6 +63,13 @@ describe("zodToStrictJsonSchema — esquemas reales", () => {
           offer_slots: { action: "offer_slots", reply: "claro" },
           book_slot: { action: "book_slot", startUtc: "2026-09-20T15:00:00Z", reason: "cotizar" },
           request_reschedule: { action: "request_reschedule", note: "mover a viernes" },
+          // 025: consulta directa; sin `reply`, con arreglo de horas y `edge` enum.
+          check_availability: {
+            action: "check_availability",
+            day: "lunes",
+            times: ["11", "4 de la tarde"],
+            edge: "latest",
+          },
         };
         for (const v of variants) {
           const name = (v.shape.action as z.ZodLiteral<string>).value;

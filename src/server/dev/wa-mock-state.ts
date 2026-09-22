@@ -45,11 +45,31 @@ export type CapiMockEvent = {
   at: string;
 };
 
+/**
+ * 024 — Un rechazo GUIONADO del próximo envío de mensaje (`POST /messages`).
+ * `code` ausente = respuesta sin cuerpo de Meta (p. ej. un 502 de un proxy):
+ * es la forma de un resultado AMBIGUO en el self-test.
+ */
+export type MockSendFailure = { status: number; code?: number; subcode?: number };
+
+/** 024 — Un envío que el mock RECHAZÓ (no entra al outbox: Meta no lo aceptó). */
+export type RejectedSend = {
+  n: number;
+  to: string;
+  type: string;
+  body: unknown;
+  status: number;
+  code: number | null;
+  at: string;
+};
+
 type WaMockState = {
   outbox: OutboxEntry[];
   templates: MockTemplate[];
   capiEvents: CapiMockEvent[];
   counter: number;
+  failNext: MockSendFailure[];
+  rejected: RejectedSend[];
 };
 
 const globalForMock = globalThis as unknown as { __waMockState?: WaMockState };
@@ -61,6 +81,8 @@ export function getWaMockState(): WaMockState {
       templates: [],
       capiEvents: [],
       counter: 0,
+      failNext: [],
+      rejected: [],
     };
   }
   return globalForMock.__waMockState;
@@ -72,6 +94,8 @@ export function resetWaMockState(): void {
     templates: [],
     capiEvents: [],
     counter: 0,
+    failNext: [],
+    rejected: [],
   };
 }
 

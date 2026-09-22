@@ -4,3 +4,4 @@
 - [Auditar antes de construir](feedback-audit-before-build.md) — verificar specs/código/banderas antes de asumir que algo falta
 - [Triaje de Dependabot](feedback-dependabot-triage.md) — priorizar por exposición real, no por severity crudo de GitHub
 - [Diagnóstico "bot no responde"](feedback-bot-no-responde-diagnostico.md) — revisar direction/origin en BD antes de sospechar del pipeline: puede ser mix-up de probar con el CRM abierto
+- [Outbox de envíos (024)](project-outbox-024.md) — payload persistido antes del intento; reintento nunca toca IA/agenda; ambiguo ⇒ delivery_unknown, sin reenvío automático

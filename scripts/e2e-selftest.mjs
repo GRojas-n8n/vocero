@@ -993,10 +993,17 @@ async function main() {
       waMessageId: `wamid.e2e.008.in.${RUN}.audio`,
     }),
   });
-  await sleep(2200); // ingesta + descarga + transcripción vía ai-mock
+  // Se espera la CONDICIÓN (ingesta + descarga + transcripción vía ai-mock), no
+  // un tiempo fijo: en un arranque en frío el servidor compila bajo demanda las
+  // rutas del ai-mock y 2.2 s no alcanzan (mismo motivo que `waitTurn`, spec 023 rev. 3).
+  const audioListo = await waitFor(async () => {
+    const ms = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
+    const a = ms.find((m) => m.media?.kind === "audio");
+    return a?.media?.caption ? a : null;
+  }, { timeoutMs: 60_000 });
   const msgs6b =
     (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
-  const inAudio = msgs6b.find((m) => m.media?.kind === "audio");
+  const inAudio = audioListo ?? msgs6b.find((m) => m.media?.kind === "audio");
   ok(
     "nota de voz entrante queda transcrita en la caption (018)",
     inAudio?.media?.fetchStatus === "available" &&
@@ -1036,7 +1043,11 @@ async function main() {
       waMessageId: `wamid.e2e.008.in.${RUN}.broken`,
     }),
   });
-  await sleep(1600);
+  // Condición observable, no tiempo fijo (arranque en frío: ver la nota de la nota de voz).
+  await waitFor(async () => {
+    const ms = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
+    return ms.some((m) => m.id !== inImg?.id && m.media?.fetchStatus === "failed");
+  }, { timeoutMs: 60_000 });
   const msgs8 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
   const broken = msgs8.find((m) => m.id !== inImg?.id && m.media?.fetchStatus === "failed");
   ok(
@@ -1063,7 +1074,12 @@ async function main() {
       waMessageId: `wamid.e2e.008.echo.${RUN}.img`,
     }),
   });
-  await sleep(1600);
+  await waitFor(async () => {
+    const ms = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
+    return ms.some(
+      (m) => m.media?.caption === "así quedaría tu logo" && m.media?.fetchStatus === "available"
+    );
+  }, { timeoutMs: 60_000 });
   const msgs9 = (await api(`/api/conversations/${conv008.id}/messages`)).json?.messages ?? [];
   const echoImg = msgs9.find((m) => m.media?.caption === "así quedaría tu logo");
   ok(
@@ -1327,6 +1343,557 @@ async function aiFormatChecks() {
     method: "PUT",
     body: JSON.stringify({ enabled: false }),
   });
+}
+
+/**
+ * 024 — Entrega ÍNTEGRA de un mensaje enriquecido ante un rechazo de Meta
+ * (incidente real: `offer_slots` armó introducción + 3 horarios, Meta rechazó
+ * temporalmente y al prospecto le llegó SOLO la introducción). Camino real:
+ * inbound → pipeline in-process → ai-mock → agenda → outbox → wa-mock, con el
+ * agente encendido (lo enciende `agendaChecks` antes de llamar aquí).
+ * Ver specs/024-entrega-integra-mensajes-salientes y tests/e2e/us-entrega-integra.md.
+ */
+async function entregaIntegraChecks() {
+  console.log(
+    "\n== 024: entrega ÍNTEGRA ante un rechazo de Meta (incidente real de offer_slots) =="
+  );
+  const failNext = (failures) =>
+    api("/api/dev/wa-mock/fail-next", {
+      method: "POST",
+      body: JSON.stringify({ failures }),
+    });
+  const rejectedTo = async (to) =>
+    ((await api("/api/dev/wa-mock/outbox")).json?.rejected ?? []).filter(
+      (r) => r.to === to
+    );
+  const convOf = async (to) =>
+    ((await api("/api/conversations")).json?.conversations ?? []).find(
+      (c) => c.contact.phone === to
+    );
+  const outMsgs = async (to) => {
+    const c = await convOf(to);
+    if (!c) return [];
+    const m = (await api(`/api/conversations/${c.id}/messages`)).json?.messages ?? [];
+    return m.filter((x) => x.direction === "out");
+  };
+  const inbound = (from, text, id) =>
+    api("/api/dev/wa-mock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        phoneNumberId: PN,
+        from,
+        name: `Lead 024 ${RUN}`,
+        text,
+        waMessageId: `wamid.e2e.024.${id}.${RUN}`,
+      }),
+    });
+  const norm = (p) => p.replace(/^521/, "52");
+
+  // --- A. Fallo TEMPORAL (503 / code 2): reintento con el payload íntegro ---
+  const LEAD_A = `52146${RUN}31`;
+  const A = norm(LEAD_A);
+  await failNext([{ status: 503, code: 2 }]);
+  await inbound(LEAD_A, "quiero agendar una cita", "a1");
+  const nA = await waitTurn(A, 0);
+  const rejA = await rejectedTo(A);
+  const okA = await outboundTo(A);
+  ok(
+    "Meta rechazó el primer envío (503/2) y el reintento lo aceptó",
+    rejA.length === 1 && okA.length === 1 && nA === 1,
+    `rechazados=${rejA.length} aceptados=${okA.length}`
+  );
+  const bodyRej = rejA[0]?.body?.text?.body ?? "";
+  const bodyOk = okA[0]?.body?.text?.body ?? "";
+  ok(
+    "el reintento manda EXACTAMENTE el mismo cuerpo que el primer intento",
+    bodyOk.length > 0 && bodyOk === bodyRej,
+    JSON.stringify({ bodyRej, bodyOk })
+  );
+  const lineasA = bodyOk.split("\n").filter((l) => l.startsWith("• "));
+  ok(
+    "el mensaje entregado conserva las opciones de horario (no es la introducción sola)",
+    lineasA.length >= 2,
+    bodyOk
+  );
+  const msgsA = await waitFor(async () => {
+    const m = await outMsgs(A);
+    return m.length === 1 && m[0].status !== "retrying" && m[0].status !== "queued" ? m : null;
+  }, { timeoutMs: 20_000 });
+  ok(
+    "UNA sola burbuja saliente en el CRM, ya enviada (sin «No se entregó» + reemplazo)",
+    Boolean(msgsA) && msgsA[0].status !== "failed" && msgsA[0].text === bodyOk,
+    JSON.stringify(msgsA?.map((m) => [m.status, (m.text ?? "").length]))
+  );
+  ok(
+    "el rechazo temporal no genera traspaso",
+    (await convOf(A))?.handoffAt === null
+  );
+
+  // Los horarios siguen siendo seleccionables DESPUÉS del reintento.
+  await inbound(LEAD_A, "sí, agenda el primero", "a2");
+  await waitTurn(A, nA);
+  const convA = await convOf(A);
+  const citasA = convA
+    ? ((await api("/api/bookings")).json?.bookings ?? []).filter(
+        (b) =>
+          b.contact?.id === convA.contact.id &&
+          (b.status === "agendada" || b.status === "realizada")
+      )
+    : [];
+  ok(
+    "tras el reintento el prospecto PUEDE elegir un horario: una sola cita real",
+    citasA.length === 1,
+    JSON.stringify(citasA.map((b) => b.id))
+  );
+
+  // --- B. Error PERMANENTE (131026): no se reintenta ---
+  const LEAD_B = `52146${RUN}32`;
+  const B = norm(LEAD_B);
+  await failNext([{ status: 400, code: 131026 }]);
+  await inbound(LEAD_B, "quiero agendar una cita", "b1");
+  const failedB = await waitFor(async () => {
+    const m = await outMsgs(B);
+    return m.length === 1 && m[0].status === "failed" ? m[0] : null;
+  });
+  ok("un rechazo permanente (131026) deja el mensaje en «failed»", Boolean(failedB));
+  ok(
+    "el motivo se muestra traducido, con el código de Meta",
+    /131026/.test(failedB?.error ?? "") && /no puede recibir/i.test(failedB?.error ?? ""),
+    failedB?.error ?? ""
+  );
+  await sleep(7_000); // más que el primer reintento posible (5 s)
+  ok(
+    "NO se reintentó: un solo rechazo, cero mensajes aceptados",
+    (await rejectedTo(B)).length === 1 && (await outboundTo(B)).length === 0
+  );
+  ok(
+    "el mensaje fallido conserva el payload completo (con horarios) para reenvío manual",
+    (failedB?.text ?? "").split("\n").filter((l) => l.startsWith("• ")).length >= 2,
+    failedB?.text ?? ""
+  );
+
+  // --- C. Resultado AMBIGUO (502 sin cuerpo de Meta): no se duplica solo ---
+  const LEAD_C = `52146${RUN}33`;
+  const C = norm(LEAD_C);
+  await failNext([{ status: 502 }]);
+  await inbound(LEAD_C, "quiero agendar una cita", "c1");
+  const unknownC = await waitFor(async () => {
+    const m = await outMsgs(C);
+    return m.length === 1 && m[0].status === "delivery_unknown" ? m[0] : null;
+  });
+  ok("un 502 sin cuerpo de Meta deja el mensaje en «delivery_unknown»", Boolean(unknownC));
+  await sleep(7_000);
+  ok(
+    "el ambiguo NO se reenvía solo (un rechazo, cero aceptados)",
+    (await rejectedTo(C)).length === 1 && (await outboundTo(C)).length === 0
+  );
+  const convC = await convOf(C);
+  ok(
+    "queda como «pendiente de responder» para que una persona lo vea",
+    convC?.pendingReply === true,
+    JSON.stringify({ pendingReply: convC?.pendingReply })
+  );
+
+  // Reenvío MANUAL: mismo payload, misma burbuja, un intento.
+  const rs = convC && unknownC
+    ? await api(`/api/conversations/${convC.id}/messages/${unknownC.id}/resend`, { method: "POST" })
+    : null;
+  ok("el reenvío manual responde 200", rs?.res.ok === true, JSON.stringify(rs?.json));
+  const sentC = await outboundTo(C);
+  ok(
+    "el reenvío manual manda el MISMO payload persistido",
+    sentC.length === 1 && sentC[0].body?.text?.body === unknownC?.text,
+    JSON.stringify(sentC.map((o) => o.body?.text?.body))
+  );
+  const afterC = await outMsgs(C);
+  ok(
+    "y sigue siendo UNA burbuja (la misma), ya enviada",
+    afterC.length === 1 && afterC[0].id === unknownC?.id && afterC[0].status !== "delivery_unknown",
+    JSON.stringify(afterC.map((m) => [m.id, m.status]))
+  );
+
+  // --- D. Reenvío manual de OFERTAS: sólo la vigente y con horarios libres ---
+  console.log(
+    "\n== 024: el reenvío manual de una OFERTA de horarios (vigencia, ronda posterior, dos operadores) =="
+  );
+  const resend = (convId, msgId) =>
+    api(`/api/conversations/${convId}/messages/${msgId}/resend`, { method: "POST" });
+  const bulletCount = (t) => (t ?? "").split("\n").filter((l) => l.startsWith("• ")).length;
+
+  // D1. Vigente y sin ronda posterior: se permite; DOS operadores a la vez → sólo uno.
+  const LEAD_D = `52146${RUN}34`;
+  const D = norm(LEAD_D);
+  await failNext([{ status: 400, code: 131026 }]);
+  await inbound(LEAD_D, "quiero agendar una cita", "d1");
+  const failedD = await waitFor(async () => {
+    const m = await outMsgs(D);
+    return m.length === 1 && m[0].status === "failed" ? m[0] : null;
+  });
+  ok("oferta fallida lista para reenviar (failed, con horarios)", Boolean(failedD) && bulletCount(failedD.text) >= 2);
+  const convD = await convOf(D);
+  const [r1, r2] = await Promise.all([resend(convD.id, failedD.id), resend(convD.id, failedD.id)]);
+  const codes = [r1.res.status, r2.res.status].sort();
+  ok(
+    "DOS operadores reenviando a la vez: uno recibe 200 y el otro 409",
+    codes[0] === 200 && codes[1] === 409,
+    JSON.stringify({ codes, e2: r2.json?.error?.code, e1: r1.json?.error?.code })
+  );
+  const okD = await outboundTo(D);
+  ok(
+    "…y sólo salió UN mensaje, con el payload original exacto",
+    okD.length === 1 && okD[0].body?.text?.body === failedD.text,
+    JSON.stringify(okD.map((o) => o.body?.text?.body))
+  );
+  const perdedor = [r1, r2].find((r) => r.res.status === 409);
+  ok(
+    "el perdedor recibe el código resend_conflict",
+    perdedor?.json?.error?.code === "resend_conflict",
+    JSON.stringify(perdedor?.json)
+  );
+
+  // D2. Otro prospecto ocupa el hueco mientras la oferta estaba sin entregar: se bloquea.
+  const LEAD_X = `52146${RUN}35`;
+  const X = norm(LEAD_X);
+  await failNext([{ status: 400, code: 131026 }]);
+  await inbound(LEAD_X, "quiero agendar una cita", "x1");
+  const failedX = await waitFor(async () => {
+    const m = await outMsgs(X);
+    return m.length === 1 && m[0].status === "failed" ? m[0] : null;
+  });
+  ok("segunda oferta fallida (pending: NO reserva disponibilidad)", Boolean(failedX));
+
+  const LEAD_Y = `52146${RUN}36`;
+  const Y = norm(LEAD_Y);
+  await inbound(LEAD_Y, "quiero agendar una cita", "y1");
+  const nY = await waitTurn(Y, 0);
+  await inbound(LEAD_Y, "sí, agenda el primero", "y2");
+  await waitTurn(Y, nY);
+  const convY = await convOf(Y);
+  const citaY = convY
+    ? ((await api("/api/bookings")).json?.bookings ?? []).filter(
+        (b) => b.contact?.id === convY.contact.id && (b.status === "agendada" || b.status === "realizada")
+      )
+    : [];
+  ok("otro prospecto reservó el primer hueco mientras la oferta estaba sin entregar", citaY.length === 1);
+
+  const convX = await convOf(X);
+  const outboxX = (await outboundTo(X)).length;
+  const msgsXAntes = (await outMsgs(X)).length;
+  const bloqueado = await resend(convX.id, failedX.id);
+  ok(
+    "el reenvío se BLOQUEA (409 offer_stale): el hueco ya no está libre",
+    bloqueado.res.status === 409 && bloqueado.json?.error?.code === "offer_stale",
+    JSON.stringify(bloqueado.json)
+  );
+  ok(
+    "el mensaje del bloqueo dice que hay que generar una nueva ronda con disponibilidad actualizada",
+    /nueva ronda/.test(bloqueado.json?.error?.message ?? "") &&
+      /disponibilidad actualizada/.test(bloqueado.json?.error?.message ?? ""),
+    bloqueado.json?.error?.message
+  );
+  ok(
+    "el bloqueo no envió nada (ni parcial) ni creó mensajes",
+    (await outboundTo(X)).length === outboxX && (await outMsgs(X)).length === msgsXAntes
+  );
+
+  // D3. Ronda posterior: el prospecto insiste, el agente arma otra; la vieja ya no se reenvía.
+  await inbound(LEAD_X, "quiero agendar una cita otra vez", "x2");
+  const nX2 = await waitTurn(X, outboxX);
+  ok("el agente armó una ronda NUEVA que Meta aceptó", nX2 === outboxX + 1);
+  const msgsX = await outMsgs(X);
+  const antes = { out: (await outboundTo(X)).length, msgs: msgsX.length };
+  const bloqueado2 = await resend(convX.id, failedX.id);
+  ok(
+    "con una ronda posterior, el reenvío de la anterior se bloquea (409 offer_stale)",
+    bloqueado2.res.status === 409 && bloqueado2.json?.error?.code === "offer_stale",
+    JSON.stringify(bloqueado2.json)
+  );
+  const despues = { out: (await outboundTo(X)).length, msgs: (await outMsgs(X)).length };
+  ok(
+    "…sin reemplazar la ronda vigente ni crear mensajes",
+    despues.out === antes.out && despues.msgs === antes.msgs,
+    JSON.stringify({ antes, despues })
+  );
+
+  // --- E. Contrato v2 de POST /api/bot/messages ---
+  console.log("\n== 024: contrato v2 de POST /api/bot/messages (retrying en vez de 502) ==");
+  const convDBot = await convOf(D);
+  await failNext([{ status: 503, code: 2 }]);
+  const botRes = await bot("/api/bot/messages", {
+    method: "POST",
+    body: JSON.stringify({ conversationId: convDBot.id, text: "Mensaje del cerebro externo\ncon dos líneas" }),
+  });
+  ok(
+    "un fallo temporal de Meta responde 200 {status:'retrying'} (antes 502)",
+    botRes.res.status === 200 && botRes.json?.status === "retrying",
+    JSON.stringify({ s: botRes.res.status, j: botRes.json })
+  );
+  ok(
+    "la respuesta declara el contrato v2 (campo y header)",
+    botRes.json?.contract === 2 && botRes.res.headers.get("x-vocero-send-contract") === "2"
+  );
+  const nBot = await waitFor(async () => {
+    const o = (await outboundTo(D)).filter((x) => x.body?.text?.body?.startsWith("Mensaje del cerebro externo"));
+    return o.length ? o : null;
+  }, { timeoutMs: 30_000 });
+  const rejBot = (await rejectedTo(D)).filter((r) => r.body?.text?.body?.startsWith("Mensaje del cerebro externo"));
+  ok(
+    "el CRM lo reenvía SOLO con el mismo cuerpo, y llegó una vez",
+    nBot?.length === 1 && rejBot.length === 1 && nBot[0].body?.text?.body === rejBot[0].body?.text?.body
+  );
+  await sleep(1_500);
+  const botMsgs = (await outMsgs(D)).filter((m) => (m.text ?? "").startsWith("Mensaje del cerebro externo"));
+  ok(
+    "el agente integrado no generó otro envío: una sola burbuja del bot",
+    botMsgs.length === 1 && (await outboundTo(D)).filter((x) => x.body?.text?.body?.startsWith("Mensaje del cerebro externo")).length === 1,
+    JSON.stringify(botMsgs.map((m) => m.status))
+  );
+
+  // --- F. Re-oferta de bookSlot (el horario elegido se ocupó): misma vía íntegra ---
+  console.log(
+    "\n== 024: la RE-OFERTA de bookSlot (slot_taken) viaja por la misma vía íntegra que offer_slots =="
+  );
+  const LEAD_P = `52146${RUN}37`;
+  const LEAD_R = `52146${RUN}38`;
+  const LEAD_Q = `52146${RUN}39`;
+  const P = norm(LEAD_P);
+  const R = norm(LEAD_R);
+  const Q = norm(LEAD_Q);
+
+  // P y R reciben la MISMA oferta (el primer hueco libre); ninguna reserva nada.
+  await inbound(LEAD_P, "quiero agendar una cita", "p1");
+  const nP = await waitTurn(P, 0);
+  await inbound(LEAD_R, "quiero agendar una cita", "r1");
+  const nR = await waitTurn(R, 0);
+  // Q reserva ANTES ese primer hueco.
+  await inbound(LEAD_Q, "quiero agendar una cita", "q1");
+  const nQ = await waitTurn(Q, 0);
+  await inbound(LEAD_Q, "sí, agenda el primero", "q2");
+  await waitTurn(Q, nQ);
+  const convQ = await convOf(Q);
+  const citaQ = convQ
+    ? ((await api("/api/bookings")).json?.bookings ?? []).filter(
+        (b) => b.contact?.id === convQ.contact.id && (b.status === "agendada" || b.status === "realizada")
+      )
+    : [];
+  ok("otro prospecto reservó el primer hueco que P y R tenían ofrecido", citaQ.length === 1);
+
+  // P elige ese hueco: se ocupó → re-oferta con alternativas. El primer envío se rechaza.
+  await failNext([{ status: 503, code: 2 }]);
+  await inbound(LEAD_P, "sí, agenda el primero", "p2");
+  const okP = await waitFor(async () => {
+    const o = (await outboundTo(P)).filter((x) => /ocupar/.test(x.body?.text?.body ?? ""));
+    return o.length ? o : null;
+  }, { timeoutMs: 45_000 });
+  const rejP = (await rejectedTo(P)).filter((x) => /ocupar/.test(x.body?.text?.body ?? ""));
+  ok("slot_taken genera una re-oferta y, tras el rechazo temporal, el reintento la entrega", okP?.length === 1 && rejP.length === 1);
+  ok(
+    "el reintento manda EXACTAMENTE las mismas alternativas (mismo cuerpo)",
+    okP?.[0]?.body?.text?.body === rejP[0]?.body?.text?.body && bulletCount(okP?.[0]?.body?.text?.body) >= 2,
+    JSON.stringify({ ok: okP?.[0]?.body?.text?.body, rej: rejP[0]?.body?.text?.body })
+  );
+  const msgsP = (await outMsgs(P)).filter((m) => /ocupar/.test(m.text ?? ""));
+  ok(
+    "UNA sola burbuja de la re-oferta y sin cita creada",
+    msgsP.length === 1 && msgsP[0].status !== "failed" && (await (async () => {
+      const cP = await convOf(P);
+      return ((await api("/api/bookings")).json?.bookings ?? []).filter((b) => b.contact?.id === cP.contact.id).length === 0;
+    })())
+  );
+  void nP;
+
+  // R: la misma situación, pero Meta rechaza la re-oferta de forma definitiva.
+  await failNext([{ status: 400, code: 131026 }]);
+  await inbound(LEAD_R, "sí, agenda el primero", "r2");
+  const failedR = await waitFor(async () => {
+    const m = (await outMsgs(R)).filter((x) => /ocupar/.test(x.text ?? ""));
+    return m.length === 1 && m[0].status === "failed" ? m[0] : null;
+  });
+  ok("la re-oferta rechazada de forma definitiva queda failed, con sus alternativas íntegras", Boolean(failedR) && bulletCount(failedR.text) >= 2);
+  const convR = await convOf(R);
+  const enviadosR = (await outboundTo(R)).length;
+  ok(
+    "sus alternativas NO reservan nada ni quedan seleccionables (pending): otro prospecto puede tomarlas",
+    enviadosR === 1 // sólo la oferta original llegó
+  );
+  const rsR = await resend(convR.id, failedR.id);
+  ok("sin ronda posterior y con las alternativas libres, el reenvío manual se permite (200)", rsR.res.status === 200, JSON.stringify(rsR.json));
+  const sentR = (await outboundTo(R)).filter((x) => /ocupar/.test(x.body?.text?.body ?? ""));
+  ok(
+    "…y manda el payload original exacto, en la misma burbuja",
+    sentR.length === 1 && sentR[0].body?.text?.body === failedR.text && (await outMsgs(R)).filter((m) => /ocupar/.test(m.text ?? "")).length === 1
+  );
+  void nR;
+}
+
+/**
+ * 025 — Consultas DIRECTAS de disponibilidad (día / hora / rango / extremo):
+ * inbound → pipeline in-process → ai-mock (`check_availability`) → motor real →
+ * outbox → wa-mock. Lo que dice el agente se contrasta con la verdad del motor
+ * leída por la API del cerebro externo (`/api/bot/availability?day=…`, que usa
+ * la MISMA consulta): si difieren, alguien está inventando disponibilidad.
+ * Ver specs/025-consultas-disponibilidad-calendario y tests/e2e/us-disponibilidad.md.
+ */
+async function disponibilidadDirectaChecks() {
+  console.log(
+    "\n== 025: consultas DIRECTAS de disponibilidad (la respuesta sale del motor, no de las primeras opciones) =="
+  );
+  const norm = (p) => p.replace(/^521/, "52");
+  const convOf = async (to) =>
+    ((await api("/api/conversations")).json?.conversations ?? []).find((c) => c.contact.phone === to);
+  const inbound = (from, text, id) =>
+    api("/api/dev/wa-mock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        phoneNumberId: PN,
+        from,
+        name: `Lead 025 ${RUN}`,
+        text,
+        waMessageId: `wamid.e2e.025.${id}.${RUN}`,
+      }),
+    });
+  const lastBody = async (to) => (await outboundTo(to)).at(-1)?.body?.text?.body ?? "";
+  const truth = async (convId, qs) =>
+    (await bot(`/api/bot/availability?conversationId=${convId}${qs}`)).json;
+  const NEGACION = /no (hay|tengo|me quedan)|agenda (llena|completa)|sin disponibilidad/i;
+
+  // Un lead por pregunta; la primera respuesta es la oferta normal (sugerencias).
+  const ask = async (suffix, primera, pregunta) => {
+    const from = `52146${RUN}${suffix}`;
+    const to = norm(from);
+    await inbound(from, primera, `${suffix}a`);
+    const n = await waitTurn(to, 0);
+    await inbound(from, pregunta, `${suffix}b`);
+    await waitTurn(to, n);
+    return { from, to, conv: await convOf(to), body: await lastBody(to) };
+  };
+
+  // 1. «¿Tienes más horarios mañana?»
+  const m = await ask("41", "quiero agendar una cita", "¿Tienes más horarios mañana?");
+  const dia = await truth(m.conv.id, "&day=mañana");
+  ok(
+    "«¿más horarios mañana?»: el mensaje es EXACTAMENTE la respuesta del motor para ese día",
+    m.body === dia.resumen && m.body.length > 0,
+    JSON.stringify({ body: m.body, resumen: dia.resumen })
+  );
+  ok(
+    "…y la respuesta es EXHAUSTIVA (no una lista truncada): metadatos coherentes con lo enviado",
+    dia.exhaustive === true &&
+      dia.hasMore === false &&
+      dia.scopeComplete === true &&
+      dia.total === dia.slots.length,
+    JSON.stringify({ e: dia.exhaustive, h: dia.hasMore, t: dia.total, n: dia.slots.length })
+  );
+  if (dia.slots.length > 0) {
+    const primero = dia.slots[0].time;
+    const ultimo = dia.slots.at(-1).time;
+    ok(
+      "el día completo llega hasta el ÚLTIMO horario libre (no se detiene en las primeras opciones)",
+      m.body.includes(ultimo) && m.body.includes(primero),
+      m.body
+    );
+    ok("no hay ninguna negación cuando SÍ hay agenda", !NEGACION.test(m.body), m.body);
+  } else {
+    ok("día sin agenda: la respuesta lo explica con causa real", /no atiendo|ya no me quedan|aviso mínimo/.test(m.body), m.body);
+  }
+
+  // 2. «¿Lunes a las 11 o 12?»
+  const h = await ask("42", "quiero agendar una cita", "¿Lunes a las 11 o 12?");
+  const lunes = await truth(h.conv.id, "&day=lunes");
+  const libres = new Set(lunes.slots.map((s) => s.time));
+  const dice = (t) => new RegExp(`a las ${t} sí tengo|libre a las [^.]*${t}`).test(h.body);
+  ok(
+    "«¿lunes a las 11 o 12?»: cada hora se contesta según el motor (libre ⇔ el motor la lista)",
+    ["11:00", "12:00"].every((t) => libres.has(t) === dice(t)),
+    JSON.stringify({ libres: [...libres].filter((t) => ["11:00", "12:00"].includes(t)), body: h.body })
+  );
+  ok("nombra el día completo (fecha) para que el prospecto corrija si no era ese", /lunes, \d+ de \w+/i.test(h.body), h.body);
+
+  // 3. «¿El lunes a las 4 o 5 de la tarde?» y después ELIGE una: prueba de que lo consultado es seleccionable.
+  const t = await ask("43", "quiero agendar una cita", "¿El lunes a las 4 o 5 de la tarde?");
+  const tarde = new Set((await truth(t.conv.id, "&day=lunes")).slots.map((s) => s.time));
+  ok(
+    "«¿lunes a las 4 o 5 de la tarde?»: 16:00 y 17:00 contestadas según el motor",
+    ["16:00", "17:00"].every((x) => tarde.has(x) === new RegExp(`libre a las [^.]*${x}|a las ${x} sí tengo`).test(t.body)),
+    t.body
+  );
+  const nT = (await outboundTo(t.to)).length;
+  await inbound(t.from, "sí, agenda el primero", "43c");
+  await waitTurn(t.to, nT);
+  const cT = await convOf(t.to);
+  const citasT = ((await api("/api/bookings")).json?.bookings ?? []).filter(
+    (b) => b.contact?.id === cT.contact.id && (b.status === "agendada" || b.status === "realizada")
+  );
+  ok(
+    "lo que el agente consultó es SELECCIONABLE tras aceptarlo Meta: una cita real",
+    citasT.length === 1,
+    JSON.stringify(citasT.map((b) => b.id))
+  );
+
+  // 4. «¿Cuál es el horario más tarde?»
+  const e = await ask("44", "quiero agendar una cita", "¿Cuál es el horario más tarde el lunes?");
+  const dl = await truth(e.conv.id, "&day=lunes");
+  ok(
+    "«el horario más tarde»: coincide con el ÚLTIMO libre que lista el motor",
+    dl.slots.length === 0 ? /no atiendo|ya no me quedan/.test(e.body) : e.body.includes(`a las ${dl.slots.at(-1).time}`),
+    JSON.stringify({ body: e.body, ultimo: dl.slots.at(-1)?.time })
+  );
+
+  // 5. API del cerebro externo: valores por defecto y metadatos honestos.
+  const def = await truth(e.conv.id, "");
+  const diasSlots = new Set(def.slots.map((s) => s.dayIso));
+  ok(
+    "GET /api/bot/availability sin parámetros: valores por defecto reales (antes, 1 hueco y 1 día)",
+    def.slots.length > 1 || def.total <= 1,
+    JSON.stringify({ n: def.slots.length, total: def.total })
+  );
+  ok(
+    "…declara si la lista es parcial (hasMore ⇔ total > devueltos) y `diasConAgenda` cubre todos los días mostrados",
+    def.hasMore === def.total > def.slots.length &&
+      def.exhaustive === !def.hasMore &&
+      [...diasSlots].every((d) => def.diasConAgenda.includes(d)) &&
+      def.scopeComplete === true,
+    JSON.stringify({ hasMore: def.hasMore, total: def.total, n: def.slots.length, dias: def.diasConAgenda })
+  );
+  const mala = await bot(`/api/bot/availability?conversationId=${e.conv.id}&day=cuando%20puedas`);
+  ok("un día que no se entiende es 422 (jamás una lista vacía que parezca «no hay»)", mala.res.status === 422, JSON.stringify(mala.json));
+
+  // 6. (revisión correctiva) Perfil HEREDADO con «Usa offer_slots»: el simulador de modelo lo obedece
+  //    (ofrece horarios aunque el cliente pida un día/hora/«la semana que viene») y es la compuerta del
+  //    SERVIDOR la que tiene que reconducirlo a la consulta directa. El perfil se restaura al terminar.
+  const perfilActual = (await api("/api/agent/profile")).json?.profile ?? {};
+  const HEREDADA =
+    "Cuando el cliente pregunte por horarios o disponibilidad, Usa offer_slots para mostrarle los horarios.";
+  await api("/api/agent/profile", { method: "PUT", body: JSON.stringify({ instructions: HEREDADA }) });
+  try {
+    const CLARIFICA = /¿Para qué día quieres que lo revise\?/;
+    const w = await ask("45", "quiero agendar una cita", "¿Tienes disponibilidad la semana que viene?");
+    ok(
+      "perfil con «Usa offer_slots» + «la semana que viene»: el prospecto recibe la ACLARACIÓN del servidor, sin horarios",
+      CLARIFICA.test(w.body) && !/\d{1,2}:\d{2}/.test(w.body),
+      w.body
+    );
+    const l = await ask("46", "quiero agendar una cita", "¿Puedes el lunes a las 11 o 12?");
+    const lunesL = await truth(l.conv.id, "&day=lunes");
+    const libresL = new Set(lunesL.slots.map((s) => s.time));
+    ok(
+      "perfil con «Usa offer_slots» + «lunes a las 11 o 12»: se contesta según el motor (no una lista genérica)",
+      ["11:00", "12:00"].every((x) => libresL.has(x) === new RegExp(`libre a las [^.]*${x}|a las ${x} sí tengo`).test(l.body)),
+      l.body
+    );
+    // Lo genérico sigue siendo offer_slots: la regla heredada se aplica donde corresponde.
+    const g = await ask("47", "quiero agendar una cita", "sí, quiero ver los horarios");
+    ok(
+      "…y una petición genérica de opciones («quiero ver los horarios») sigue ofreciendo sugerencias",
+      /\d{1,2}:\d{2}/.test(g.body) && !CLARIFICA.test(g.body),
+      g.body
+    );
+  } finally {
+    await api("/api/agent/profile", {
+      method: "PUT",
+      body: JSON.stringify({ instructions: perfilActual.instructions ?? null }),
+    });
+  }
 }
 
 /* ============================================================
@@ -1871,6 +2438,13 @@ async function agendaChecks() {
       !/¡listo!/i.test(ultimoMax.body.text.body),
     JSON.stringify(ultimoMax)
   );
+
+  // 024 — Va DESPUÉS de las secciones de Max: el ai-mock siempre agenda el
+  // PRIMER hueco ofrecido, y correrlo antes le quitaría a Max el suyo (el
+  // servidor lo rechaza con `slot_taken`, correctamente).
+  await entregaIntegraChecks();
+
+  await disponibilidadDirectaChecks();
 
   // Se apaga de vuelta: el resto del guion asume el agente in-process OFF.
   await api("/api/agent/profile", {

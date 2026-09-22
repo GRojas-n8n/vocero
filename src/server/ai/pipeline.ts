@@ -31,6 +31,7 @@ import { SendError, sendText } from "@/server/inbox/send";
 import {
   agentActionSchema,
   degradeAction,
+  normalizeAgentAction,
   resolveStage,
   type AgentActionType,
 } from "@/server/ai/actions";
@@ -38,8 +39,16 @@ import { matchesHandoffIntent } from "@/server/ai/handoff";
 import { buildAgentSystemPrompt, rulesBlockOf } from "@/server/ai/prompts";
 import { recoverPlainText } from "@/server/ai/recovery";
 import { agendaEnabled } from "@/server/agenda/flag";
-import { bookSlot, offerSlots, recordRescheduleRequest } from "@/server/agenda/agent";
-import { getOffers } from "@/server/agenda/offers";
+import {
+  bookSlot,
+  checkAvailability,
+  offerSlots,
+  recordRescheduleRequest,
+  type AgendaTurn,
+} from "@/server/agenda/agent";
+import { claimsNoAvailability } from "@/server/agenda/availability-query";
+import { guardAgendaAction } from "@/server/agenda/query-intent";
+import { getOffers, replaceOffers, type OfferedSlot } from "@/server/agenda/offers";
 import { awaitMediaJob } from "@/server/whatsapp/media";
 import { recordAiNote } from "@/server/contacts/notes";
 
@@ -297,6 +306,23 @@ export async function runAgentTurn(
   const lastInbound = [...history].reverse().find((m) => m.direction === "in");
   if (!lastInbound) return;
 
+  // 024 (G5) — Un turno, una respuesta lógica. La respuesta a este entrante
+  // lleva una clave única: si ya existe (el turno se re-ejecutó tras un
+  // reinicio, o corrió dos veces), NO se vuelve a llamar al modelo ni a la
+  // agenda. El Laboratorio no la usa (sus mensajes nunca salen). Esa respuesta
+  // es más NUEVA que el entrante, así que ya viene en el historial de arriba
+  // (sin otra consulta); la restricción UNIQUE de `message.dedupe_key` es la
+  // garantía dura si dos turnos corrieran a la vez.
+  const turnKey = conversation.isTest ? undefined : `agent-turn:${lastInbound.id}`;
+  if (turnKey && history.some((m) => m.dedupeKey === turnKey)) {
+    logAi("info", {
+      event: "turn_outcome",
+      traceId: conversation.id,
+      outcome: "already_answered",
+    });
+    return;
+  }
+
   // Ventana cerrada: el agente JAMÁS envía texto libre → handoff 'ventana'.
   if (!conversation.isTest && !isWindowOpen(conversation.lastInboundAt)) {
     await applyHandoff(conversationId, organizationId, "ventana");
@@ -350,7 +376,7 @@ export async function runAgentTurn(
   if (model) {
     const gate = circuitCheck(organizationId, model);
     if (!gate.allow) {
-      await handleCircuitOpen(conversation, model, gate);
+      await handleCircuitOpen(conversation, model, gate, turnKey);
       return;
     }
   }
@@ -366,6 +392,8 @@ export async function runAgentTurn(
     // El texto plano (invalid_json) lo maneja la recuperación segura de abajo,
     // no una corrección genérica: ver spec 023 §3.4.
     correct: { invalidJson: false },
+    // 025 rev.: `""`/`[]` = ausencia, ANTES de validar el esquema.
+    normalize: normalizeAgentAction,
   });
 
   let action: AgentActionType;
@@ -381,34 +409,105 @@ export async function runAgentTurn(
       budget,
       rulesText: rulesBlockOf(systemPrompt),
       aiConfig,
+      turnKey,
     });
     if (!handled) return;
     action = handled;
   }
 
-  // 015 — Agenda. Un fallo del motor degrada el turno (el agente responde sin
+  // 025 (rev. correctiva) — La compuerta de las acciones de agenda, con lo que el
+  // CLIENTE escribió en este turno (los entrantes desde la última respuesta):
+  // `edge` sólo si lo pidió con esas palabras, vacíos = ausencia, y `offer_slots`
+  // con un día/fecha/hora/rango en el mensaje ES `check_availability` (aunque el
+  // perfil del negocio diga «usa offer_slots»). No cambia nada más.
+  if (agenda && (action.action === "offer_slots" || action.action === "check_availability")) {
+    const lastOut = history.map((m) => m.direction).lastIndexOf("out");
+    const customerText = history
+      .slice(lastOut + 1)
+      .filter((m) => m.direction === "in" && m.text)
+      .map((m) => m.text as string)
+      .join(" ");
+    const guarded = guardAgendaAction(action, customerText);
+    if (guarded.changes.length > 0) {
+      action = guarded.action;
+      logAi("info", {
+        event: "action_guard",
+        traceId: conversationId,
+        outcome: guarded.changes.join("+"),
+      });
+    }
+  }
+
+  // 015 — Agenda. Un fallo del MOTOR degrada el turno (el agente responde sin
   // agendar), nunca lo tumba: quedarse callado es peor que no agendar.
-  if (action.action === "offer_slots" || action.action === "book_slot") {
+  //
+  // 024 (G1, G7) — SÓLO el motor va dentro del `try`. Antes, el envío también
+  // estaba ahí: un rechazo temporal de Meta se confundía con "el motor falló",
+  // `degradeAction` convertía `offer_slots` en la introducción sola y ESO era lo
+  // que llegaba al prospecto (incidente 2026-09). Con el payload ya armado,
+  // nada lo reconstruye ni lo sustituye: si el envío falla, el mensaje —íntegro—
+  // queda en el outbox (reintento, `delivery_unknown` o `failed`).
+  if (
+    action.action === "offer_slots" ||
+    action.action === "book_slot" ||
+    action.action === "check_availability"
+  ) {
     if (!agenda) {
       action = degradeAction(action);
     } else {
+      let turn: AgendaTurn | null = null;
       try {
-        const turn =
+        turn =
           action.action === "offer_slots"
             ? await offerSlots({
                 organizationId,
                 conversationId,
                 intro: action.reply,
               })
-            : await bookSlot({
-                organizationId,
-                conversationId,
-                startUtc: action.startUtc,
-                confirmation: action.reply,
-                reason: action.reason,
-                confirmAdditional: action.confirmAdditional,
-              });
-        await deliverReply(conversation, turn.text);
+            : action.action === "check_availability"
+              ? await checkAvailability({
+                  organizationId,
+                  conversationId,
+                  query: {
+                    day: action.day,
+                    times: action.times,
+                    from: action.from,
+                    to: action.to,
+                    edge: action.edge,
+                  },
+                })
+              : await bookSlot({
+                  organizationId,
+                  conversationId,
+                  startUtc: action.startUtc,
+                  confirmation: action.reply,
+                  reason: action.reason,
+                  confirmAdditional: action.confirmAdditional,
+                });
+      } catch (err) {
+        console.error(`[agente] el motor de agenda falló: ${describeError(err)}`);
+        // Sin `reply` que degradar: un texto fijo, sin afirmar nada de horarios.
+        action =
+          action.action === "check_availability"
+            ? {
+                action: "reply",
+                text: "Tuve un problema al revisar la agenda. Lo confirmo con el equipo y te aviso por aquí.",
+              }
+            : degradeAction(action);
+      }
+      if (turn) {
+        try {
+          await deliverReply(conversation, turn.text, {
+            turnKey,
+            offers: turn.offers,
+          });
+        } catch (err) {
+          // El fallo de envío ya quedó registrado en el mensaje (con su
+          // estado y su payload íntegro). No hay nada que sustituir.
+          console.error(
+            `[agente] respuesta de agenda no entregada: ${describeError(err)}`
+          );
+        }
         if (turn.ok) {
           publish(organizationId, {
             type: "conversation.updated",
@@ -416,9 +515,6 @@ export async function runAgentTurn(
           });
         }
         return;
-      } catch (err) {
-        console.error(`[agente] el motor de agenda falló: ${describeError(err)}`);
-        action = degradeAction(action);
       }
     }
   }
@@ -442,7 +538,9 @@ export async function runAgentTurn(
       });
       await applyHandoff(conversationId, organizationId, "reprogramacion");
       try {
-        await deliverReply(conversation, action.reply?.trim() || turn.text);
+        await deliverReply(conversation, action.reply?.trim() || turn.text, {
+          turnKey,
+        });
       } catch (err) {
         console.error(
           `[agente] traspaso por reprogramación aplicado pero el aviso no se pudo enviar: ${describeError(err)}`
@@ -463,7 +561,7 @@ export async function runAgentTurn(
         data: { conversation: { id: conversationId } },
       });
       if (action.reply) {
-        await deliverReply(conversation, action.reply);
+        await deliverReply(conversation, action.reply, { turnKey });
       }
       return;
     }
@@ -472,9 +570,30 @@ export async function runAgentTurn(
   switch (action.action) {
     case "none":
       return;
-    case "reply":
-      await deliverReply(conversation, action.text);
+    case "reply": {
+      // 025 §5.4 — una NEGACIÓN de agenda escrita por el modelo («no tengo
+      // horarios»), que sólo vio una lista parcial, no se envía: se sustituye por
+      // lo que el motor dice de verdad (que puede ser, con evidencia, que no hay).
+      if (agenda && claimsNoAvailability(action.text)) {
+        let real: AgendaTurn | null = null;
+        try {
+          real = await checkAvailability({ organizationId, conversationId, query: {} });
+        } catch (err) {
+          console.error(`[agente] no pude verificar la agenda: ${describeError(err)}`);
+        }
+        if (real) {
+          logAi("warn", {
+            event: "turn_outcome",
+            traceId: conversation.id,
+            outcome: "availability_claim_replaced",
+          });
+          await deliverReply(conversation, real.text, { turnKey, offers: real.offers });
+          return;
+        }
+      }
+      await deliverReply(conversation, action.text, { turnKey });
       return;
+    }
     case "update_lead": {
       await recordAiNote({
         organizationId,
@@ -484,7 +603,7 @@ export async function runAgentTurn(
         isTest: conversation.isTest,
         sourceMessageId: lastInbound.id,
       });
-      if (action.reply) await deliverReply(conversation, action.reply);
+      if (action.reply) await deliverReply(conversation, action.reply, { turnKey });
       return;
     }
     case "handoff": {
@@ -498,7 +617,7 @@ export async function runAgentTurn(
       await applyHandoff(conversationId, organizationId, "modelo");
       if (action.farewell) {
         try {
-          await deliverReply(conversation, action.farewell);
+          await deliverReply(conversation, action.farewell, { turnKey });
         } catch (err) {
           console.error(
             `[agente] traspaso aplicado pero la despedida no se pudo enviar: ${describeError(err)}`
@@ -542,6 +661,7 @@ async function handleModelFailure(input: {
   budget: CallBudget;
   rulesText: string;
   aiConfig: { apiToken?: string; model?: string };
+  turnKey?: string;
 }): Promise<AgentActionType | null> {
   const { result, conversation, model } = input;
   const traceId = conversation.id;
@@ -612,7 +732,7 @@ async function handleModelFailure(input: {
     }
   }
 
-  await degradeTurn(conversation, result.error);
+  await degradeTurn(conversation, result.error, input.turnKey);
   return null;
 }
 
@@ -625,7 +745,8 @@ async function handleModelFailure(input: {
  */
 async function degradeTurn(
   conversation: Conversation,
-  code: string
+  code: string,
+  turnKey?: string
 ): Promise<void> {
   let consecutive = 1;
   try {
@@ -655,7 +776,7 @@ async function degradeTurn(
     outcome: "degraded",
   });
   try {
-    await deliverReply(conversation, aiFallbackMessage());
+    await deliverReply(conversation, aiFallbackMessage(), { turnKey });
   } catch (err) {
     console.error(
       `[agente] mensaje de degradación no enviado: ${describeError(err)}`
@@ -672,7 +793,8 @@ async function degradeTurn(
 async function handleCircuitOpen(
   conversation: Conversation,
   model: string,
-  gate: Extract<CircuitGate, { allow: false }>
+  gate: Extract<CircuitGate, { allow: false }>,
+  turnKey?: string
 ): Promise<void> {
   logAi("warn", {
     event: "circuit_blocked",
@@ -683,7 +805,7 @@ async function handleCircuitOpen(
   });
   if (circuitNoticeRecent(conversation, CIRCUIT.baseCooldownMs)) return;
   try {
-    await deliverReply(conversation, aiFallbackMessage());
+    await deliverReply(conversation, aiFallbackMessage(), { turnKey });
     await markCircuitNotice(conversation);
   } catch (err) {
     console.error(
@@ -692,13 +814,24 @@ async function handleCircuitOpen(
   }
 }
 
-/** Entrega la respuesta: envío real o persistencia sandbox (is_test). */
+/**
+ * Entrega la respuesta: envío real o persistencia sandbox (is_test).
+ *
+ * 024 — `turnKey` hace única la respuesta del turno y `offers` son los horarios
+ * que el texto muestra: se persisten con el mensaje y se activan cuando Meta lo
+ * acepta. Un fallo RECUPERABLE de Meta no lanza: el mensaje queda en el outbox.
+ */
 async function deliverReply(
   conversation: Conversation,
-  text: string
+  text: string,
+  ctx: { turnKey?: string; offers?: OfferedSlot[] } = {}
 ): Promise<void> {
   if (conversation.isTest) {
     await persistTestOutbound(conversation, text);
+    // El sandbox nunca sale a Meta: sus horarios son seleccionables al instante.
+    if (ctx.offers && ctx.offers.length > 0) {
+      await replaceOffers(conversation.organizationId, conversation.id, ctx.offers);
+    }
     return;
   }
   try {
@@ -707,6 +840,8 @@ async function deliverReply(
       organizationId: conversation.organizationId,
       text,
       aiGenerated: true,
+      dedupeKey: ctx.turnKey,
+      offers: ctx.offers,
     });
   } catch (err) {
     if (err instanceof SendError && err.code === "window_closed") {
