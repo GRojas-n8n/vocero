@@ -90,3 +90,19 @@ horario del negocio, zona horaria, duración, aviso mínimo, buffers y citas exi
 - Un `day`/hora que no se entiende responde `422 invalid_query`: **no** una lista vacía.
 
 Como siempre, esta llamada **registra** la oferta (`active`): es lo que habilita `POST /api/bot/bookings`.
+
+## Adenda (spec 026, propuesta — pendiente de commit/despliegue)
+
+Aditivo, sin versionar (mismo criterio que arriba):
+
+- **`day`** entiende ahora el calificador de semana: `este jueves` (semana calendario actual,
+  puede ser hoy; si ya pasó, `422` en vez de reinterpretar en silencio) vs `jueves de la próxima
+  semana` (siempre la semana calendario siguiente) vs `jueves`/`el próximo jueves`/`jueves que
+  viene` (la ocurrencia más cercana, sin cambio de 025).
+- **`altDays`** (nuevo, lista separada por comas: `altDays=jueves,viernes`): días alternativos,
+  tope 3, evaluados en el **orden dado**. `kind` gana el valor `"days"`. **No se llama `days`**:
+  ese nombre ya lo tiene la ventana numérica de arriba (`LIMITS.days`, por defecto 5) — reusarlo
+  habría chocado con ese contrato ya publicado; el error se detectó y corrigió con
+  `pnpm test:integration` durante la implementación, antes de publicarse.
+- Un `day`/`altDays` que no se entiende sigue respondiendo `422 invalid_query`, con el mismo texto
+  que vería el prospecto por WhatsApp.

@@ -27,6 +27,8 @@ export type EdgeValue = "earliest" | "latest";
 
 export type QueryFields = {
   day?: string;
+  /** 026 — días alternativos ("jueves o viernes"). Mutuamente excluyente con `day`. */
+  days?: string[];
   times?: string[];
   from?: string;
   to?: string;
@@ -40,9 +42,15 @@ const str = (v: unknown): string | undefined => {
   return t === "" ? undefined : t;
 };
 
+/** Tope defensivo de `days[]` ANTES de que `availability-query.ts` decida "demasiados" (regla del dueño: máx 3). */
+const DAYS_ARRAY_HARD_CAP = 10;
+
 /**
  * `""`, espacios, `null`, `[]`, `[""]` y un `edge` que no es de los dos valores
- * ⇒ AUSENTE. Lo demás se conserva (recortado). Acepta un texto suelto en `times`.
+ * ⇒ AUSENTE. Lo demás se conserva (recortado). Acepta un texto suelto en
+ * `times`/`days`. `day` y `days` son mutuamente excluyentes: si `days` trae
+ * algo, `day` se descarta (026 §3.2 — el servidor no le pregunta al modelo
+ * por un descuido de formato, mismo criterio que 025 §11.4).
  */
 export function normalizeQueryFields(raw: Record<string, unknown> | null | undefined): QueryFields {
   const r = raw ?? {};
@@ -52,6 +60,15 @@ export function normalizeQueryFields(raw: Record<string, unknown> | null | undef
   const list = Array.isArray(r.times) ? r.times : r.times === undefined || r.times === null ? [] : [r.times];
   const times = list.map(str).filter((t): t is string => t !== undefined);
   if (times.length > 0) out.times = times;
+  const dayList = Array.isArray(r.days) ? r.days : r.days === undefined || r.days === null ? [] : [r.days];
+  const daysArr = dayList
+    .map(str)
+    .filter((t): t is string => t !== undefined)
+    .slice(0, DAYS_ARRAY_HARD_CAP);
+  if (daysArr.length > 0) {
+    out.days = daysArr;
+    delete out.day;
+  }
   const from = str(r.from);
   if (from) out.from = from;
   const to = str(r.to);

@@ -17,6 +17,7 @@ import {
   type AvailabilityQuery,
   type DayData,
 } from "@/server/agenda/availability-query";
+import { resolveDayExpression } from "@/lib/time/day-expressions";
 import { DEFAULT_CALENDAR_SETTINGS, type CalendarSettings } from "@/server/agenda/settings";
 
 /**
@@ -67,12 +68,27 @@ function buildDays(settings: CalendarSettings, now: Date, busy: SlotUtc[] = []) 
 
 function ask(
   query: AvailabilityQuery,
-  opts: { settings?: CalendarSettings; now?: Date; busy?: SlotUtc[] } = {}
+  opts: {
+    settings?: CalendarSettings;
+    now?: Date;
+    busy?: SlotUtc[];
+    impliedWeekModifier?: "same" | "next";
+    priorClarifyAttempt?: number;
+  } = {}
 ): AvailabilityAnswer {
   const settings = opts.settings ?? settingsWith();
   const now = opts.now ?? NOW;
   const { days, todayIso, horizonEndIso } = buildDays(settings, now, opts.busy);
-  return answerQuery({ query, settings, now, todayIso, horizonEndIso, days });
+  return answerQuery({
+    query,
+    settings,
+    now,
+    todayIso,
+    horizonEndIso,
+    days,
+    impliedWeekModifier: opts.impliedWeekModifier,
+    priorClarifyAttempt: opts.priorClarifyAttempt,
+  });
 }
 
 /** Un bloqueo de pared en la zona del negocio. */
@@ -253,6 +269,127 @@ describe("casos límite: cada negación tiene una causa REAL", () => {
     const a = ask({ times: ["11"] }, { settings: settingsWith({ weeklyHours: { mon: [{ start: "14:00", end: "18:00" }] } }) });
     expect(a.text).toContain("No tengo libre a esa hora en los próximos 7 días.");
     expect(a.meta).toMatchObject({ scopeComplete: true, total: 0, exhaustive: true });
+  });
+});
+
+describe("026 — días alternativos (`days[]`)", () => {
+  it("«jueves o viernes» (sin calificador): ocurrencias más cercanas, EN EL ORDEN DEL CLIENTE", () => {
+    // Hoy es jueves 17: el jueves más cercano es el 24 (nunca hoy); el viernes es mañana (18).
+    // El texto debe listar el jueves PRIMERO aunque su fecha caiga después (regla del dueño).
+    const a = ask({ days: ["jueves", "viernes"] });
+    expect(a.meta.kind).toBe("days");
+    const lines = a.text.split("\n");
+    expect(lines[0]).toContain("Jueves, 24 de septiembre");
+    expect(lines[1]).toContain("18 de septiembre"); // "Mañana viernes, 18…" (dayLabelInTz)
+    expect(a.ok).toBe(true);
+  });
+
+  it("«jueves o viernes de la próxima semana»: ambos dentro de esa semana (regla 4 aplicada a los dos)", () => {
+    const a = ask({ days: ["jueves de la próxima semana", "viernes de la próxima semana"] });
+    const lines = a.text.split("\n");
+    expect(lines[0]).toContain("Jueves, 24 de septiembre");
+    expect(lines[1]).toContain("Viernes, 25 de septiembre");
+  });
+
+  it("un día dentro del horizonte y otro fuera: cada uno se explica por separado, sin negar el que sí hay (regla 13)", () => {
+    // Horizonte por defecto termina el jueves 24. "1 de octubre" cae fuera.
+    const a = ask({ days: ["lunes", "1 de octubre"] });
+    expect(a.text).toContain("Lunes, 21 de septiembre puedo iniciar");
+    expect(a.text).toContain("está fuera de mi horizonte");
+    expect(a.meta.total).toBeGreaterThan(0); // el lunes SÍ cuenta
+    expect(a.ok).toBe(true);
+  });
+
+  it("un día completamente ocupado entre varios: se explica su causa, no se omite en silencio", () => {
+    const a = ask({ days: ["lunes", "martes"] }, { busy: [block(MON, "09:00", "18:00")] });
+    expect(a.text).toContain("Lunes, 21 de septiembre ya no me quedan horarios libres.");
+    expect(a.text).toContain("Martes, 22 de septiembre puedo iniciar");
+  });
+
+  it("más de 3 días: pide que elija, sin evaluar nada", () => {
+    const a = ask({ days: ["lunes", "martes", "miércoles", "jueves"] });
+    expect(a.status).toBe("availability_clarify");
+    expect(a.clarify?.reason).toBe("too_many_days");
+    expect(a.text).toContain("hasta 3 días");
+  });
+
+  it("`days` con un solo elemento se comporta como `day`", () => {
+    const a = ask({ days: ["lunes"] });
+    expect(a.meta.kind).toBe("day");
+  });
+});
+
+describe("026 — aclaración: calificador de semana, contexto y variación (reglas 5, 10, 14)", () => {
+  it("«este lunes» (ya pasó esta semana): NO se reinterpreta en silencio — pide aclaración con la fecha real", () => {
+    const a = ask({ day: "este lunes" }); // hoy es jueves 17; el lunes de esta semana (14) ya pasó
+    expect(a.status).toBe("availability_clarify");
+    expect(a.clarify?.reason).toBe("already_passed_this_week");
+    expect(a.text).toContain("ya pasó");
+    expect(a.text).toContain("próxima semana");
+    expect(a.offers).toEqual([]);
+    expect(a.clarify?.context).toEqual({ days: ["este lunes"] });
+  });
+
+  it("segundo intento consecutivo de la MISMA razón: texto corto, nunca repetido", () => {
+    const first = ask({ day: "este lunes" }, { priorClarifyAttempt: 1 });
+    const second = ask({ day: "este lunes" }, { priorClarifyAttempt: 2 });
+    expect(second.text).not.toBe(first.text);
+    expect(second.text).toBe("¿Esta semana o la próxima?");
+  });
+
+  it("«la semana que viene» sin día: aclara y RECUERDA el calificador (para heredarlo en el turno siguiente)", () => {
+    const a = ask({ day: "la semana que viene" });
+    expect(a.status).toBe("availability_clarify");
+    expect(a.clarify?.reason).toBe("unresolved_day");
+    expect(a.clarify?.context).toEqual({ weekModifier: "next" });
+  });
+
+  it("heredar el calificador: «el viernes» + impliedWeekModifier:'next' resuelve a la semana SIGUIENTE", () => {
+    // "jueves" no sirve de ejemplo aquí: hoy ES jueves, así que bare y "next" coinciden
+    // por coincidencia aritmética (ambos saltan +7 días). "viernes" sí los distingue.
+    const bare = ask({ day: "viernes" });
+    expect(bare.text).toContain("18 de septiembre"); // mañana, esta semana
+    // El viernes de la semana SIGUIENTE (25 sep) cae fuera del horizonte por defecto (7 días,
+    // termina el 24): la herencia del calificador NUNCA inventa disponibilidad — dice la
+    // verdad del horizonte en vez de fingir que el 25 está disponible (regla 9 / AC-11).
+    const inherited = ask({ day: "viernes" }, { impliedWeekModifier: "next" });
+    expect(inherited.meta.kind).toBe("none");
+    expect(inherited.text).toContain("Por ahora agendo hasta el jueves, 24 de septiembre");
+
+    // Con un horizonte más ancho, sí se resuelve al viernes de la semana siguiente (25 sep).
+    const wideHorizon = settingsWith({ maxDaysAhead: 14 });
+    const inheritedWide = ask({ day: "viernes" }, { impliedWeekModifier: "next", settings: wideHorizon });
+    expect(inheritedWide.text).toContain("25 de septiembre");
+  });
+
+  it("segunda aclaración de hora/rango sin resolver: varía el texto también", () => {
+    const t1 = ask({ day: "lunes", times: ["por la tarde"] }, { priorClarifyAttempt: 1 });
+    const t2 = ask({ day: "lunes", times: ["por la tarde"] }, { priorClarifyAttempt: 2 });
+    expect(t1.clarify?.reason).toBe("unresolved_time");
+    expect(t2.text).not.toBe(t1.text);
+    const r1 = ask({ day: "lunes", from: "pronto" }, { priorClarifyAttempt: 1 });
+    const r2 = ask({ day: "lunes", from: "pronto" }, { priorClarifyAttempt: 2 });
+    expect(r1.clarify?.reason).toBe("unresolved_range");
+    expect(r2.text).not.toBe(r1.text);
+  });
+
+  /** Cuenta patrones de fecha "N de <mes>" en un texto (oráculo simple, independiente del código). */
+  const DATE_PATTERN = /\d{1,2}\s+de\s+[a-záéíóúñ]+/gi;
+  const countDates = (text: string) => (text.match(DATE_PATTERN) ?? []).length;
+
+  it("regla del dueño: NUNCA más de 2 fechas concretas dentro de una misma aclaración (nunca cartesiana)", () => {
+    // Un solo día ya pasado: como mucho la fecha de "esta semana" que pasó.
+    const single = ask({ day: "este lunes" });
+    expect(countDates(single.text)).toBeLessThanOrEqual(2);
+    // Dos días alternativos, AMBOS ya pasados esta semana (ambigüedad de semana COMPARTIDA):
+    // la pregunta corta nunca enumera las 4 fechas posibles (2 días × 2 semanas).
+    const double = ask({ days: ["este lunes", "este martes"] });
+    expect(double.clarify?.reason).toBe("already_passed_this_week");
+    expect(countDates(double.text)).toBeLessThanOrEqual(2);
+    // El segundo intento (pregunta corta) nunca trae ninguna fecha.
+    const repeat = ask({ days: ["este lunes", "este martes"] }, { priorClarifyAttempt: 2 });
+    expect(countDates(repeat.text)).toBe(0);
+    expect(repeat.text).toBe("¿Esta semana o la próxima?");
   });
 });
 
@@ -488,4 +625,158 @@ describe("propiedades sobre 150 agendas y consultas aleatorias", () => {
     // La prueba de verdad ejercita ambas ramas (no es vacua).
     expect(negations).toBeGreaterThanOrEqual(3);
   }, 90_000);
+});
+
+/* ------------------------------------------------------------------ */
+/* 026 T22 — Barrido amplio: calificador de semana, `days[]`, límites  */
+/* de semana/mes/año en America/Mexico_City. Reloj FIJO (9 anclas,     */
+/* cubren los 7 días de la semana como "hoy" + un cruce de mes/año +   */
+/* un año bisiesto) y semilla reproducible (mulberry32, ver `rng`).    */
+/* ------------------------------------------------------------------ */
+
+describe("026 — barrido amplio: calificador de semana y días alternativos", () => {
+  /** 2026-09-13..19 cubre domingo..sábado UNA vez cada uno; los otros dos cruzan mes/año/bisiesto. */
+  const ANCHORS = [
+    "2026-09-13", // domingo
+    "2026-09-14", // lunes
+    "2026-09-15", // martes
+    "2026-09-16", // miércoles
+    "2026-09-17", // jueves — "hoy es jueves" (regla 3)
+    "2026-09-18", // viernes
+    "2026-09-19", // sábado
+    "2026-12-29", // martes — cruza a enero del año siguiente dentro del horizonte
+    "2028-02-27", // domingo — año bisiesto, cruza a marzo
+  ];
+  const VARIANTS_PER_ANCHOR = 17; // 9 × 17 = 153 ≥ 150
+  const SWEEP_SEED = 20260926;
+
+  /** Oráculo INDEPENDIENTE (aritmética propia, no reutiliza el código bajo prueba). */
+  function expectedThursdayDates(todayIso: string) {
+    const todayWd = new Date(`${todayIso}T00:00:00Z`).getUTCDay();
+    const mondayThis = addDaysISO(todayIso, -((todayWd + 6) % 7));
+    const same = addDaysISO(mondayThis, 3); // jueves de ESTA semana calendario
+    const next = addDaysISO(mondayThis, 10); // jueves de la semana SIGUIENTE
+    const diff = ((4 - todayWd + 7) % 7) || 7;
+    const nearest = addDaysISO(todayIso, diff); // ocurrencia más cercana, nunca hoy
+    return { same, next, nearest };
+  }
+  function expectedFridayDates(todayIso: string) {
+    const todayWd = new Date(`${todayIso}T00:00:00Z`).getUTCDay();
+    const mondayThis = addDaysISO(todayIso, -((todayWd + 6) % 7));
+    const same = addDaysISO(mondayThis, 4);
+    const next = addDaysISO(mondayThis, 11);
+    const diff = ((5 - todayWd + 7) % 7) || 7;
+    const nearest = addDaysISO(todayIso, diff);
+    return { same, next, nearest };
+  }
+
+  it("cubre los 7 días de la semana como fecha actual (auto-chequeo de las anclas)", () => {
+    const weekdays = new Set(ANCHORS.slice(0, 7).map((d) => new Date(`${d}T00:00:00Z`).getUTCDay()));
+    expect(weekdays.size).toBe(7);
+  });
+
+  it("«jueves»/«el jueves»/«este jueves»/«jueves que viene»/«jueves de la próxima semana», «jueves o viernes» [de la próxima semana]: 150+ casos reproducibles, sin inventar nada", () => {
+    const r = rng(SWEEP_SEED);
+    const pick = <T,>(xs: T[]): T => xs[Math.floor(r() * xs.length)]!;
+    let cases = 0;
+    let alreadyPassedCases = 0;
+    let multiDayOrderChecks = 0;
+
+    for (const anchorIso of ANCHORS) {
+      const now = new Date(`${anchorIso}T18:00:00Z`); // 18:00Z = mediodía CDMX (mismo criterio que NOW arriba)
+      for (let v = 0; v < VARIANTS_PER_ANCHOR; v++) {
+        cases++;
+        const weekly: CalendarSettings["weeklyHours"] = {};
+        for (const d of ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const) {
+          const roll = r();
+          if (roll < 0.2) continue; // día cerrado (huecos "fuera de horario" reales)
+          weekly[d] = [{ start: pick(["08:00", "09:00", "10:00"]), end: pick(["16:00", "18:00", "20:00"]) }];
+        }
+        const settings = settingsWith({
+          timezone: "America/Mexico_City", // fijo a propósito: límites de semana en ESTA zona (pedido del dueño)
+          weeklyHours: weekly,
+          slotMinutes: pick([15, 30, 45, 60]),
+          bufferMinutes: pick([0, 0, 5, 15]),
+          minNoticeHours: pick([0, 1, 2, 24]),
+          maxDaysAhead: pick([3, 5, 7, 10, 14, 21]), // algunos < 7 (fuerza "fuera de horizonte"), otros ≥ 14
+        });
+        const busy: SlotUtc[] = [];
+        for (let b = 0; b < Math.floor(r() * 5); b++) {
+          const dayIso = addDaysISO(anchorIso, Math.floor(r() * settings.maxDaysAhead));
+          const h = 8 + Math.floor(r() * 11);
+          busy.push(block(dayIso, `${String(h).padStart(2, "0")}:00`, `${String(h + 1).padStart(2, "0")}:00`, "America/Mexico_City"));
+        }
+        const truth = buildDays(settings, now, busy);
+        const freeSet = new Set(truth.free.map((s) => s.startUtc));
+        const ctxLabel = `ancla=${anchorIso} v=${v} maxDaysAhead=${settings.maxDaysAhead}`;
+        const { todayIso, horizonEndIso, days } = truth;
+        const ask = (query: AvailabilityQuery) =>
+          answerQuery({ query, settings, now, todayIso, horizonEndIso, days });
+
+        const expThu = expectedThursdayDates(todayIso);
+
+        // 1) Las 5 formas de "jueves": bare/"el"/"que viene" coinciden con el más cercano (reglas 1,2,3,6).
+        for (const variant of ["jueves", "el jueves", "jueves que viene"]) {
+          const resolved = resolveDayExpression(variant, todayIso);
+          expect(resolved, `${ctxLabel} «${variant}»`).toEqual({ ok: true, dayIso: expThu.nearest });
+        }
+        // 2) "este jueves": semana ACTUAL — si ya pasó, NUNCA se reinterpreta en silencio (regla 5).
+        const esteJueves = resolveDayExpression("este jueves", todayIso);
+        if (expThu.same >= todayIso) {
+          expect(esteJueves, `${ctxLabel} «este jueves» (no ha pasado)`).toEqual({ ok: true, dayIso: expThu.same });
+        } else {
+          expect(esteJueves, `${ctxLabel} «este jueves» (ya pasó)`).toEqual({
+            ok: false,
+            reason: "already_passed_this_week",
+          });
+          alreadyPassedCases++;
+        }
+        // 3) "jueves de la próxima semana": SIEMPRE la semana calendario siguiente (regla 4).
+        const jueProxima = resolveDayExpression("jueves de la próxima semana", todayIso);
+        expect(jueProxima, `${ctxLabel} «jueves de la próxima semana»`).toEqual({ ok: true, dayIso: expThu.next });
+
+        // 4) Contra el motor: cada resolución dentro del horizonte nunca inventa ni niega de más.
+        for (const variant of ["jueves", "este jueves", "jueves de la próxima semana"]) {
+          const resolved = resolveDayExpression(variant, todayIso);
+          if (!resolved.ok || resolved.dayIso < todayIso || resolved.dayIso > horizonEndIso) continue;
+          const a = ask({ day: variant });
+          for (const m of a.matches) expect(freeSet.has(m.startUtc), `${ctxLabel} «${variant}» inventó ${m.startUtc}`).toBe(true);
+          for (const o of a.offers) expect(freeSet.has(o.startUtc), `${ctxLabel} «${variant}» ofreció ${o.startUtc} no libre`).toBe(true);
+          if (claimsNoAvailability(a.text)) {
+            expect(a.meta.scopeComplete, `${ctxLabel} «${variant}» negación sin alcance completo`).toBe(true);
+            expect(a.meta.total, `${ctxLabel} «${variant}» negación con coincidencias`).toBe(0);
+          }
+        }
+
+        // 5) «jueves o viernes» [de la próxima semana]: orden del CLIENTE (no cronológico), sin inventar.
+        for (const suffix of ["", " de la próxima semana"]) {
+          const tokenThu = `jueves${suffix}`;
+          const tokenFri = `viernes${suffix}`;
+          const expFri = expectedFridayDates(todayIso);
+          const resThu = suffix ? expThu.next : expThu.nearest;
+          const resFri = suffix ? expFri.next : expFri.nearest;
+          const thuInScope = resThu >= todayIso && resThu <= horizonEndIso;
+          const friInScope = resFri >= todayIso && resFri <= horizonEndIso;
+          const thuHasFree = thuInScope && (days.find((d) => d.dayIso === resThu)?.free.length ?? 0) > 0;
+          const friHasFree = friInScope && (days.find((d) => d.dayIso === resFri)?.free.length ?? 0) > 0;
+          if (thuHasFree && friHasFree && resThu !== resFri) {
+            multiDayOrderChecks++;
+            const forward = ask({ days: [tokenThu, tokenFri] });
+            const backward = ask({ days: [tokenFri, tokenThu] });
+            const firstDayOf = (a: AvailabilityAnswer, tz: string) => dayIsoInTz(new Date(a.matches[0]!.startUtc), tz);
+            expect(firstDayOf(forward, "America/Mexico_City"), `${ctxLabel} orden jueves-viernes${suffix}`).toBe(resThu);
+            expect(firstDayOf(backward, "America/Mexico_City"), `${ctxLabel} orden viernes-jueves${suffix}`).toBe(resFri);
+            for (const m of [...forward.matches, ...backward.matches]) {
+              expect(freeSet.has(m.startUtc), `${ctxLabel} days[] inventó ${m.startUtc}`).toBe(true);
+            }
+          }
+        }
+      }
+    }
+
+    expect(cases).toBeGreaterThanOrEqual(150);
+    // La prueba de verdad ejercita el caso "ya pasó" (regla 5) y el de orden en days[] (no es vacua).
+    expect(alreadyPassedCases).toBeGreaterThan(0);
+    expect(multiDayOrderChecks).toBeGreaterThan(0);
+  }, 120_000);
 });

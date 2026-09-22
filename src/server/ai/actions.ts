@@ -88,6 +88,12 @@ const agendaActions = [
     action: z.literal("check_availability"),
     /** "mañana", "lunes", "25 de septiembre" o ISO. Omitido = todo el horizonte. */
     day: z.string().optional(),
+    /**
+     * 026 — Días ALTERNATIVOS cuando el cliente ofrece más de uno con «o»/«u»
+     * ("jueves o viernes"), tope 3, en el orden en que los dijo. Mutuamente
+     * excluyente con `day` (si mandas ambos, éste se ignora).
+     */
+    days: z.array(z.string()).optional(),
     /** Horas concretas, tal como las dijo: ["11", "12"], ["4 de la tarde"]. */
     times: z.array(z.string()).optional(),
     /** Rango: "entre las 3 y las 5 pm" → from "3 pm", to "5 pm". */

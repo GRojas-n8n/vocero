@@ -3,7 +3,9 @@ import {
   minutesOfDay,
   normalizeExpression,
   parseTimeReading,
+  parseWeekQualifier,
   resolveDayExpression,
+  weekdayDatesThisAndNextWeek,
   weekdayIndexOf,
   withinIntervals,
 } from "@/lib/time/day-expressions";
@@ -46,21 +48,111 @@ describe("resolveDayExpression", () => {
   it.each([
     ["lunes", "2026-09-21"],
     ["el lunes", "2026-09-21"],
-    ["este lunes", "2026-09-21"],
     ["próximo lunes", "2026-09-21"],
+    ["el próximo lunes", "2026-09-21"],
+    ["lunes que viene", "2026-09-21"],
     ["martes", "2026-09-22"],
     ["miércoles", "2026-09-23"],
     ["viernes", "2026-09-18"],
+    // «viernes que viene» discrimina de "de la próxima semana" (regla 1, no regla 4): si "que
+    // viene" se tratara como calificador de SEMANA SIGUIENTE por error, esto daría 2026-09-25.
+    ["viernes que viene", "2026-09-18"],
     ["sábado", "2026-09-19"],
     ["domingo", "2026-09-20"],
     ["monday", "2026-09-21"],
-  ])("el día de la semana «%s» es el PRÓXIMO (%s)", (raw, expected) => {
+  ])("el día de la semana «%s» es el PRÓXIMO (%s) — reglas 1, 2, 6", (raw, expected) => {
     expect(day(raw)).toBe(expected);
   });
 
-  it("«jueves» dicho un jueves es el de la semana SIGUIENTE, nunca hoy", () => {
+  it("«jueves» dicho un jueves es el de la semana SIGUIENTE, nunca hoy (regla 3)", () => {
     expect(day("jueves")).toBe("2026-09-24");
     expect(day("el jueves")).toBe("2026-09-24");
+    expect(day("jueves que viene")).toBe("2026-09-24");
+    expect(day("el próximo jueves")).toBe("2026-09-24");
+  });
+
+  /* 026 — «este <día>»: la semana calendario ACTUAL, puede ser hoy; si ya
+   * pasó, NO se reinterpreta en silencio (regla 5). TODAY = jueves 2026-09-17. */
+  describe("«este <día>» — semana ACTUAL (regla 5, distinto de «el próximo»/bare)", () => {
+    it("«este jueves» dicho un jueves ES hoy", () => {
+      expect(day("este jueves")).toBe("2026-09-17");
+      expect(day("esta jueves")).toBe("2026-09-17"); // tolera el género
+    });
+
+    it("un día de esta semana que TODAVÍA no llega: se resuelve normal", () => {
+      expect(day("este viernes")).toBe("2026-09-18"); // mañana, dentro de esta semana
+      expect(day("este sábado")).toBe("2026-09-19");
+      expect(day("este domingo")).toBe("2026-09-20");
+    });
+
+    it("un día de esta semana que YA PASÓ: no se convierte en la próxima semana — se rechaza con la razón", () => {
+      expect(resolveDayExpression("este lunes", TODAY)).toEqual({
+        ok: false,
+        reason: "already_passed_this_week",
+      });
+      expect(resolveDayExpression("este martes", TODAY)).toEqual({
+        ok: false,
+        reason: "already_passed_this_week",
+      });
+      expect(resolveDayExpression("este miércoles", TODAY)).toEqual({
+        ok: false,
+        reason: "already_passed_this_week",
+      });
+    });
+
+    it("dicho un LUNES (inicio de semana), «este lunes» también es hoy", () => {
+      expect(day("este lunes", "2026-09-21")).toBe("2026-09-21");
+    });
+
+    it("dicho un DOMINGO (fin de semana), el lunes de esta semana ya pasó", () => {
+      expect(resolveDayExpression("este lunes", "2026-09-20")).toEqual({
+        ok: false,
+        reason: "already_passed_this_week",
+      });
+      expect(day("este domingo", "2026-09-20")).toBe("2026-09-20"); // hoy mismo
+    });
+  });
+
+  /* 026 — «<día> de la próxima semana»: SIEMPRE la semana calendario
+   * siguiente, exista o no ya haya pasado el día de esta semana (regla 4). */
+  describe("«<día> de la próxima semana» — SIEMPRE la semana siguiente (regla 4)", () => {
+    it.each([
+      ["jueves de la próxima semana", "2026-09-24"], // hoy es jueves → +7 (igual que bare, coincide)
+      ["domingo de la próxima semana", "2026-09-27"], // bare "domingo" sería el 20 (esta semana): distinto
+      ["viernes de la semana que viene", "2026-09-25"], // bare "viernes" sería mañana (18): distinto
+      ["martes de la semana entrante", "2026-09-22"],
+      ["miércoles de la otra semana", "2026-09-23"],
+    ])("«%s» → %s", (raw, expected) => {
+      expect(day(raw)).toBe(expected);
+    });
+
+    it("dicho un LUNES: «jueves de la próxima semana» es una semana completa después del jueves más cercano", () => {
+      // El próximo jueves (bare) desde el lunes 21 es el 24; "de la próxima semana" salta a Oct 1.
+      expect(day("jueves", "2026-09-21")).toBe("2026-09-24");
+      expect(day("jueves de la próxima semana", "2026-09-21")).toBe("2026-10-01");
+    });
+  });
+
+  describe("parseWeekQualifier", () => {
+    it("separa el calificador del resto", () => {
+      expect(parseWeekQualifier("jueves de la próxima semana")).toEqual({ qualifier: "next", rest: "jueves" });
+      expect(parseWeekQualifier("este jueves")).toEqual({ qualifier: "same", rest: "jueves" });
+      expect(parseWeekQualifier("jueves que viene")).toEqual({ qualifier: "none", rest: "jueves" });
+      expect(parseWeekQualifier("jueves")).toEqual({ qualifier: "none", rest: "jueves" });
+      expect(parseWeekQualifier("25 de septiembre")).toEqual({ qualifier: "none", rest: "25 de septiembre" });
+    });
+  });
+
+  describe("weekdayDatesThisAndNextWeek", () => {
+    it("da ambas fechas aunque la de esta semana ya haya pasado", () => {
+      expect(weekdayDatesThisAndNextWeek("lunes", TODAY)).toEqual({ same: "2026-09-14", next: "2026-09-21" });
+      expect(weekdayDatesThisAndNextWeek("jueves", TODAY)).toEqual({ same: "2026-09-17", next: "2026-09-24" });
+    });
+
+    it("null si no es un día de semana reconocible", () => {
+      expect(weekdayDatesThisAndNextWeek("mañana", TODAY)).toBeNull();
+      expect(weekdayDatesThisAndNextWeek("no sé", TODAY)).toBeNull();
+    });
   });
 
   it.each([

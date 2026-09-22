@@ -8,6 +8,11 @@ import {
   type AvailabilityMeta,
   type AvailabilityQuery,
 } from "@/server/agenda/availability-query";
+import type {
+  AgendaClarifyContext,
+  AgendaClarifyReason,
+  WeekQualifier,
+} from "@/server/agenda/agenda-clarify-context";
 import {
   BookingError,
   createSessionBooking,
@@ -71,6 +76,12 @@ export type AgendaTurn = {
    * que declara `hasMore`.
    */
   availability?: AvailabilityMeta;
+  /**
+   * 026 — presente SÓLO cuando `status === "availability_clarify"`: por qué
+   * no se pudo resolver y qué se entendió, para que el pipeline decida si
+   * hereda el contexto en el turno siguiente o escala a un humano.
+   */
+  clarify?: { reason: AgendaClarifyReason; context: AgendaClarifyContext | null };
 };
 
 export async function offerSlots(input: {
@@ -156,10 +167,16 @@ export async function checkAvailability(input: {
   organizationId: string;
   conversationId: string;
   query: AvailabilityQuery;
+  /** 026 — calificador de semana heredado de una aclaración pendiente (regla 10). */
+  impliedWeekModifier?: WeekQualifier;
+  /** 026 — 1 = primera vez que se pregunta esto; ≥2 = ya se preguntó antes. */
+  priorClarifyAttempt?: number;
 }): Promise<AgendaTurn> {
   const answer = await queryAvailability({
     organizationId: input.organizationId,
     query: input.query,
+    impliedWeekModifier: input.impliedWeekModifier,
+    priorClarifyAttempt: input.priorClarifyAttempt,
   });
   return {
     ok: answer.ok,
@@ -167,6 +184,7 @@ export async function checkAvailability(input: {
     text: answer.text,
     offers: answer.offers.length > 0 ? answer.offers : undefined,
     availability: answer.meta,
+    clarify: answer.clarify,
   };
 }
 

@@ -48,6 +48,17 @@ import {
 } from "@/server/agenda/agent";
 import { claimsNoAvailability } from "@/server/agenda/availability-query";
 import { guardAgendaAction } from "@/server/agenda/query-intent";
+import {
+  isUnambiguousTopicChange,
+  mergeClarifyContext,
+  nextAttemptNumber,
+  recordUnresolvedAttempt,
+} from "@/server/agenda/agenda-clarify-context";
+import {
+  loadAgendaClarifyState,
+  resetAgendaClarifyState,
+  writeAgendaClarifyState,
+} from "@/server/agenda/agenda-clarify-state";
 import { getOffers, replaceOffers, type OfferedSlot } from "@/server/agenda/offers";
 import { awaitMediaJob } from "@/server/whatsapp/media";
 import { recordAiNote } from "@/server/contacts/notes";
@@ -415,18 +426,25 @@ export async function runAgentTurn(
     action = handled;
   }
 
+  // 026 — texto del cliente desde la última respuesta (se usa para la compuerta
+  // de agenda, la fusión de contexto de aclaración y la detección de cambio de
+  // tema). Se calcula UNA vez, siempre, aunque esta instancia no tenga agenda.
+  const lastOut = history.map((m) => m.direction).lastIndexOf("out");
+  const customerText = history
+    .slice(lastOut + 1)
+    .filter((m) => m.direction === "in" && m.text)
+    .map((m) => m.text as string)
+    .join(" ");
+  // 026 — memoria de aclaración de disponibilidad, cargada de la fila YA leída
+  // de `conversation` (sin otra consulta): 0/null/null si no hay nada pendiente.
+  const clarifyState = loadAgendaClarifyState(conversation);
+
   // 025 (rev. correctiva) — La compuerta de las acciones de agenda, con lo que el
-  // CLIENTE escribió en este turno (los entrantes desde la última respuesta):
-  // `edge` sólo si lo pidió con esas palabras, vacíos = ausencia, y `offer_slots`
-  // con un día/fecha/hora/rango en el mensaje ES `check_availability` (aunque el
-  // perfil del negocio diga «usa offer_slots»). No cambia nada más.
+  // CLIENTE escribió en este turno: `edge` sólo si lo pidió con esas palabras,
+  // vacíos = ausencia, y `offer_slots` con un día/fecha/hora/rango en el mensaje
+  // ES `check_availability` (aunque el perfil del negocio diga «usa offer_slots»).
+  // No cambia nada más.
   if (agenda && (action.action === "offer_slots" || action.action === "check_availability")) {
-    const lastOut = history.map((m) => m.direction).lastIndexOf("out");
-    const customerText = history
-      .slice(lastOut + 1)
-      .filter((m) => m.direction === "in" && m.text)
-      .map((m) => m.text as string)
-      .join(" ");
     const guarded = guardAgendaAction(action, customerText);
     if (guarded.changes.length > 0) {
       action = guarded.action;
@@ -436,6 +454,26 @@ export async function runAgentTurn(
         outcome: guarded.changes.join("+"),
       });
     }
+  }
+
+  // 026 (regla 11-b) — Una aclaración de disponibilidad pendiente NO se limpia
+  // sólo porque el modelo haya elegido, ESTE turno, una acción no relacionada
+  // con agenda (eso solo no basta): hace falta ADEMÁS una señal determinista de
+  // cambio de tema (`isUnambiguousTopicChange`, servidor). Si hay duda, se
+  // conserva — un falso positivo sólo hace que se pregunte de más, nunca que
+  // se invente disponibilidad.
+  if (
+    agenda &&
+    clarifyState.count > 0 &&
+    action.action !== "check_availability" &&
+    action.action !== "offer_slots" &&
+    action.action !== "book_slot" &&
+    isUnambiguousTopicChange(customerText)
+  ) {
+    await resetAgendaClarifyState(conversation);
+    clarifyState.count = 0;
+    clarifyState.kind = null;
+    clarifyState.context = null;
   }
 
   // 015 — Agenda. Un fallo del MOTOR degrada el turno (el agente responde sin
@@ -465,17 +503,22 @@ export async function runAgentTurn(
                 intro: action.reply,
               })
             : action.action === "check_availability"
-              ? await checkAvailability({
-                  organizationId,
-                  conversationId,
-                  query: {
-                    day: action.day,
-                    times: action.times,
-                    from: action.from,
-                    to: action.to,
-                    edge: action.edge,
-                  },
-                })
+              ? await (() => {
+                  // 026 — el turno actual manda; el contexto de una aclaración
+                  // pendiente sólo RELLENA lo que falte (regla 10).
+                  const merged = mergeClarifyContext(
+                    clarifyState.context,
+                    { day: action.day, days: action.days, times: action.times, from: action.from, to: action.to, edge: action.edge },
+                    customerText
+                  );
+                  return checkAvailability({
+                    organizationId,
+                    conversationId,
+                    query: merged.query,
+                    impliedWeekModifier: merged.impliedWeekModifier,
+                    priorClarifyAttempt: nextAttemptNumber(clarifyState),
+                  });
+                })()
               : await bookSlot({
                   organizationId,
                   conversationId,
@@ -496,6 +539,24 @@ export async function runAgentTurn(
             : degradeAction(action);
       }
       if (turn) {
+        // 026 — memoria de aclaración: se actualiza ANTES de enviar, para que
+        // un fallo de envío no deje el contador desincronizado del texto que
+        // (con suerte) sí llegó en el reintento del outbox.
+        let escalatedToHandoff = false;
+        if (action.action === "check_availability" && turn.status === "availability_clarify" && turn.clarify) {
+          const outcome = recordUnresolvedAttempt(clarifyState, turn.clarify.reason, turn.clarify.context);
+          await writeAgendaClarifyState(conversation, clarifyState.count, outcome.state);
+          if (outcome.escalate) {
+            escalatedToHandoff = true;
+            turn = {
+              ...turn,
+              text: "No logro ubicar bien la fecha después de varios intentos. Ya avisé al equipo para que te ayude directamente por aquí.",
+            };
+          }
+        } else if (clarifyState.count > 0) {
+          await resetAgendaClarifyState(conversation);
+        }
+
         try {
           await deliverReply(conversation, turn.text, {
             turnKey,
@@ -508,7 +569,11 @@ export async function runAgentTurn(
             `[agente] respuesta de agenda no entregada: ${describeError(err)}`
           );
         }
-        if (turn.ok) {
+        if (escalatedToHandoff) {
+          // 026 regla 15 — tres aclaraciones consecutivas sin resolver: se
+          // deriva a un humano en vez de volver a preguntar.
+          await applyHandoff(conversationId, organizationId, "agenda_ambigua");
+        } else if (turn.ok) {
           publish(organizationId, {
             type: "conversation.updated",
             data: { conversation: { id: conversationId } },
@@ -878,16 +943,35 @@ async function persistTestOutbound(
 export async function applyHandoff(
   conversationId: string,
   organizationId: string,
-  reason: "cliente" | "modelo" | "error" | "ventana" | "reprogramacion"
+  reason:
+    | "cliente"
+    | "modelo"
+    | "error"
+    | "ventana"
+    | "reprogramacion"
+    /** 026 — 3 aclaraciones de disponibilidad consecutivas sin resolver (regla 15). */
+    | "agenda_ambigua"
 ): Promise<void> {
   const db = getDb();
   // Idempotente a propósito (WHERE handoff_at IS NULL): un segundo intento de
   // traspaso sobre la MISMA conversación (p. ej. la despedida del handoff de
   // arriba falla por ventana cerrada y `deliverReply` dispara su propio
   // applyHandoff("ventana")) no debe pisar el motivo real ya registrado.
+  //
+  // 026 (regla 11 d/e) — CUALQUIER handoff, sea cual sea el motivo, limpia la
+  // memoria de aclaración de disponibilidad: "interviene una persona" cierra
+  // el ciclo pendiente, sin importar si la agenda tuvo algo que ver con este
+  // traspaso en particular.
   const updated = await db
     .update(schema.conversation)
-    .set({ handoffAt: new Date(), handoffReason: reason, updatedAt: new Date() })
+    .set({
+      handoffAt: new Date(),
+      handoffReason: reason,
+      updatedAt: new Date(),
+      agendaClarifyCount: 0,
+      agendaClarifyKind: null,
+      agendaClarifyContext: null,
+    })
     .where(
       and(
         eq(schema.conversation.id, conversationId),
