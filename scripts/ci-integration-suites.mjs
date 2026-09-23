@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * CI — las suites de integración (Postgres real) de las specs 024 y 025.
+ * CI — las suites de integración (Postgres real) de las specs 024, 025 y 026.
  *
  * Existe para que una suite NO pueda desaparecer en silencio: que un archivo se
  * renombre, quede en `.skip` o deje de coincidir con el filtro del paso de CI no
@@ -34,6 +34,11 @@ export const GROUPS = {
     title: "spec 025 · consultas de disponibilidad del calendario",
     filters: ["availability-"],
     files: ["availability-diagnosis.test.ts", "availability-query.test.ts", "availability-guard.test.ts"],
+  },
+  "026": {
+    title: "spec 026 · aclaraciones de disponibilidad del calendario",
+    filters: ["agenda-clarify"],
+    files: ["agenda-clarify.test.ts"],
   },
   aislamiento: {
     title: "aislamiento de red del arnés (ni Meta ni OpenRouter reales)",
