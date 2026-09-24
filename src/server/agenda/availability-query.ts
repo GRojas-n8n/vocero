@@ -14,10 +14,18 @@ import {
 import {
   minutesOfDay,
   parseTimeReading,
+  parseWeekQualifier,
   resolveDayExpression,
+  weekdayDatesThisAndNextWeek,
   withinIntervals,
+  type DayResolution,
   type WallInterval,
 } from "@/lib/time/day-expressions";
+import type {
+  AgendaClarifyContext,
+  AgendaClarifyReason,
+  WeekQualifier,
+} from "@/server/agenda/agenda-clarify-context";
 import {
   buildCandidateSlots,
   computeAvailability,
@@ -46,6 +54,12 @@ import { getSettings, type CalendarSettings } from "@/server/agenda/settings";
 export type AvailabilityQuery = {
   /** Lo que dijo el prospecto o ISO: "mañana", "lunes", "25 de septiembre", "2026-09-21". */
   day?: string;
+  /**
+   * 026 — Días ALTERNATIVOS ("jueves o viernes"), en el orden en que el
+   * cliente los dijo, tope `MAX_QUERY_DAYS`. Mutuamente excluyente con `day`:
+   * si vienen ambos, `days` gana (ver `normalizeQueryFields`).
+   */
+  days?: string[];
   /** Horas concretas: "11", "12:00", "4 de la tarde". */
   times?: string[];
   /** Rango: el horario debe iniciar ≥ `from` y terminar ≤ `to`. */
@@ -57,12 +71,17 @@ export type AvailabilityQuery = {
 export type AvailabilityKind =
   | "suggestions"
   | "day"
+  /** 026 — dos o tres días alternativos pedidos por nombre (`days[]`). */
+  | "days"
   | "times"
   | "range"
   | "edge"
   | "overview"
   | "clarify"
   | "none";
+
+/** 026 — tope de días alternativos que se evalúan en una sola consulta. */
+export const MAX_QUERY_DAYS = 3;
 
 export type AvailabilityMeta = {
   kind: AvailabilityKind;
@@ -97,6 +116,13 @@ export type AvailabilityAnswer = {
   ok: boolean;
   status: "availability" | "availability_clarify";
   checks: TimeCheck[];
+  /**
+   * 026 — presente SÓLO cuando `status === "availability_clarify"`: por qué
+   * no se pudo resolver y qué se entendió (para heredarlo en el turno
+   * siguiente, `agenda-clarify-context.ts`). `null`/ausente si no hay nada
+   * que recordar.
+   */
+  clarify?: { reason: AgendaClarifyReason; context: AgendaClarifyContext | null };
 };
 
 export type NotFreeReason =
@@ -132,6 +158,10 @@ export async function queryAvailability(input: {
   query: AvailabilityQuery;
   now?: Date;
   settings?: CalendarSettings;
+  /** 026 — calificador de semana heredado de una aclaración pendiente (regla 10). */
+  impliedWeekModifier?: WeekQualifier;
+  /** 026 — 1 = primera vez que se pregunta esto; ≥2 = ya se preguntó antes (varía el texto). */
+  priorClarifyAttempt?: number;
 }): Promise<AvailabilityAnswer> {
   const settings = input.settings ?? (await getSettings(input.organizationId));
   const now = input.now ?? new Date();
@@ -164,7 +194,16 @@ export async function queryAvailability(input: {
     };
   });
 
-  return answerQuery({ query: input.query, settings, now, todayIso, horizonEndIso, days });
+  return answerQuery({
+    query: input.query,
+    settings,
+    now,
+    todayIso,
+    horizonEndIso,
+    days,
+    impliedWeekModifier: input.impliedWeekModifier,
+    priorClarifyAttempt: input.priorClarifyAttempt,
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -179,38 +218,101 @@ export function answerQuery(input: {
   horizonEndIso: string;
   /** Todos los días del horizonte [hoy, hoy + maxDaysAhead], completos. */
   days: DayData[];
+  /** 026 — calificador de semana heredado de una aclaración pendiente (regla 10). */
+  impliedWeekModifier?: WeekQualifier;
+  /** 026 — 1 = primera vez que se pregunta esto; ≥2 = ya se preguntó antes (varía el texto, regla 14). */
+  priorClarifyAttempt?: number;
 }): AvailabilityAnswer {
   const { settings, now, todayIso, horizonEndIso, days } = input;
   // `""`, espacios y `[]` son AUSENCIA (defensa en profundidad: quien llame, el modelo o la API).
   const query: AvailabilityQuery = normalizeQueryFields(input.query as Record<string, unknown>);
   const tz = settings.timezone;
   const ctx: Ctx = { settings, now, tz, days };
+  const attempt = input.priorClarifyAttempt ?? 1;
 
   const wantsTimes = (query.times?.length ?? 0) > 0;
   const wantsRange = Boolean(query.from || query.to);
 
-  // 1) Alcance: un día concreto o todo el horizonte.
-  let scope: DayData[];
-  if (query.day !== undefined && query.day.trim() !== "") {
-    const resolved = resolveDayExpression(query.day, todayIso);
-    if (!resolved.ok) {
-      return clarify(
-        "¿Para qué día quieres que lo revise? Dime, por ejemplo, «mañana», «el lunes» o una fecha como «25 de septiembre»."
+  // 1) Alcance: uno o varios días concretos (026: `days[]`), o todo el horizonte.
+  const dayTokens: string[] | null =
+    query.days && query.days.length > 0
+      ? query.days
+      : query.day && query.day.trim() !== ""
+        ? [query.day]
+        : null;
+
+  let scope: DayData[] = days;
+  let namedCount = 0;
+  /** 026 — notas honestas de días NOMBRADOS que cayeron fuera de alcance (pasado/horizonte, regla 13). */
+  const outOfScopeNotes: string[] = [];
+
+  if (dayTokens) {
+    if (dayTokens.length > MAX_QUERY_DAYS) {
+      return clarifyWith(
+        attempt <= 1
+          ? `Puedo revisar hasta ${MAX_QUERY_DAYS} días a la vez — ¿cuáles de esos te interesan más?`
+          : `Dime hasta ${MAX_QUERY_DAYS} días (por ejemplo «jueves y viernes») y los reviso.`,
+        "too_many_days",
+        null
       );
     }
-    if (resolved.dayIso < todayIso) {
-      return none(`Esa fecha (${dayName(resolved.dayIso, ctx)}) ya pasó. ¿Qué otro día te acomoda?`);
+    const resolutions = dayTokens.map((token) => ({
+      token,
+      result: resolveDayExpression(token, todayIso, input.impliedWeekModifier),
+    }));
+    const failed = resolutions.filter(
+      (r): r is { token: string; result: Extract<DayResolution, { ok: false }> } => !r.result.ok
+    );
+    if (failed.length > 0) {
+      return buildDayClarify(failed, ctx, todayIso, attempt);
     }
-    if (resolved.dayIso > horizonEndIso) {
-      return none(
-        `Por ahora agendo hasta el ${dayName(horizonEndIso, ctx)}. ¿Te acomoda algún día antes de esa fecha?`
-      );
+    const resolvedIsos: { token: string; dayIso: string }[] = resolutions.map((r) => ({
+      token: r.token,
+      dayIso: (r.result as Extract<DayResolution, { ok: true }>).dayIso,
+    }));
+    namedCount = dayTokens.length;
+    if (namedCount === 1) {
+      // Sin cambio de 025: un solo día pasado/fuera de horizonte aborta con una respuesta honesta.
+      const { dayIso } = resolvedIsos[0]!;
+      if (dayIso < todayIso) {
+        return none(`Esa fecha (${dayName(dayIso, ctx)}) ya pasó. ¿Qué otro día te acomoda?`);
+      }
+      if (dayIso > horizonEndIso) {
+        return none(
+          `Por ahora agendo hasta el ${dayName(horizonEndIso, ctx)}. ¿Te acomoda algún día antes de esa fecha?`
+        );
+      }
+    } else {
+      // 026 regla 13: cada día nombrado se explica por separado, sin abortar el resto.
+      for (const { dayIso } of resolvedIsos) {
+        if (dayIso < todayIso) {
+          outOfScopeNotes.push(`${cap(dayName(dayIso, ctx))} ya pasó.`);
+        } else if (dayIso > horizonEndIso) {
+          outOfScopeNotes.push(
+            `${cap(dayName(dayIso, ctx))} está fuera de mi horizonte (agendo hasta el ${dayName(horizonEndIso, ctx)}).`
+          );
+        }
+      }
     }
-    scope = days.filter((d) => d.dayIso === resolved.dayIso);
-  } else {
-    scope = days;
+    // 026 regla: conserva el ORDEN del cliente (no el cronológico) — «jueves o
+    // viernes» describe primero el jueves aunque su fecha caiga después.
+    // Dedupe por si dos tokens resuelven al MISMO día (p. ej. "este jueves" y
+    // "jueves que viene" coincidiendo): se describe una sola vez.
+    scope = [];
+    const seenIsos = new Set<string>();
+    for (const { dayIso } of resolvedIsos) {
+      if (dayIso < todayIso || dayIso > horizonEndIso) continue;
+      if (seenIsos.has(dayIso)) continue;
+      seenIsos.add(dayIso);
+      const found = days.find((d) => d.dayIso === dayIso);
+      if (found) scope.push(found);
+    }
+    if (namedCount >= 2 && scope.length === 0) {
+      return none(outOfScopeNotes.join(" "));
+    }
   }
-  const singleDay = scope.length === 1 && Boolean(query.day && query.day.trim());
+  const singleDay = namedCount === 1;
+  const multiDay = namedCount >= 2;
 
   // 2) Rango (si lo pidió): se lee una vez por día porque el horario cambia.
   const rangeFor = (d: DayData): { from: number; to: number } | "unparsable" => {
@@ -236,8 +338,12 @@ export function answerQuery(input: {
     if (wantsTimes) {
       const asked = askedTimes(query.times!, d, ctx);
       if (asked === "unparsable") {
-        return clarify(
-          "¿A qué hora quieres que lo revise? Dime, por ejemplo, «a las 11», «a las 4 de la tarde» o «a las 16:00»."
+        return clarifyWith(
+          attempt <= 1
+            ? "¿A qué hora quieres que lo revise? Dime, por ejemplo, «a las 11», «a las 4 de la tarde» o «a las 16:00»."
+            : "Dime la hora así: «11», «4 de la tarde» o «16:00».",
+          "unresolved_time",
+          null
         );
       }
       for (const a of asked) checks.push({ dayIso: d.dayIso, hhmm: a.hhmm, free: a.free, reason: a.reason });
@@ -248,7 +354,13 @@ export function answerQuery(input: {
     if (wantsRange) {
       const r = rangeFor(d);
       if (r === "unparsable") {
-        return clarify("¿Entre qué horas quieres que lo revise? Por ejemplo, «entre las 2 y las 4 de la tarde».");
+        return clarifyWith(
+          attempt <= 1
+            ? "¿Entre qué horas quieres que lo revise? Por ejemplo, «entre las 2 y las 4 de la tarde»."
+            : "Dime el rango así: «entre las 2 y las 4 de la tarde» o «después de las 3».",
+          "unresolved_range",
+          null
+        );
       }
       base = d.free.filter(
         (s) =>
@@ -270,15 +382,17 @@ export function answerQuery(input: {
       ? "edge"
       : wantsRange
         ? "range"
-        : singleDay
-          ? "day"
-          : "overview";
+        : multiDay
+          ? "days"
+          : singleDay
+            ? "day"
+            : "overview";
 
   // 4) Qué días se describen.
   const withMatches = results.filter((r) => r.matches.length > 0);
   const total = results.reduce((n, r) => n + r.matches.length, 0);
-  const presented = singleDay ? results : withMatches.slice(0, MAX_DAYS_SHOWN);
-  const omittedDays = singleDay ? 0 : Math.max(0, withMatches.length - presented.length);
+  const presented = singleDay || multiDay ? results : withMatches.slice(0, MAX_DAYS_SHOWN);
+  const omittedDays = singleDay || multiDay ? 0 : Math.max(0, withMatches.length - presented.length);
 
   // 5) Texto + horarios.
   const lines: string[] = [];
@@ -286,11 +400,14 @@ export function answerQuery(input: {
   const registerDays: DayData[] = [];
   let conveyed = 0;
   let cappedDay = false;
+  // 026: con varios días nombrados, cada uno se explica aunque no tenga nada (regla 13) —
+  // salvo "edge" (`describeDay` no sabe describir un extremo vacío; combinación rara, sin evidencia real).
+  const alwaysIncludeDay = kind === "times" || (multiDay && kind !== "edge");
 
   for (const r of presented) {
-    // Una pregunta por horas siempre se responde (con la causa de cada una);
+    // Una pregunta por horas (o varios días nombrados) siempre se responde;
     // los demás tipos sólo describen días que tienen algo que cumpla.
-    if (r.matches.length === 0 && kind !== "times") continue;
+    if (r.matches.length === 0 && !alwaysIncludeDay) continue;
     const { line, shown, capped } = describeDay(kind, r, ctx, query);
     lines.push(line);
     for (const s of shown) shownStarts.add(s.startUtc);
@@ -303,7 +420,15 @@ export function answerQuery(input: {
   let extraSuggestions: AvailableSlot[] = [];
   if (total === 0) {
     const horizonFree = days.flatMap((d) => d.free);
-    if (singleDay) {
+    if (multiDay) {
+      // El bucle de arriba ya explicó cada día por separado (regla 13, describeDay→dayEmptyText);
+      // aquí sólo se agregan las opciones más cercanas.
+      const anchorDay = scope[0];
+      const anchor = anchorDay
+        ? anchorUtc(anchorDay.dayIso, query, anchorDay.intervals, tz)
+        : anchorUtc(todayIso, query, [], tz);
+      extraSuggestions = nearestSlots(horizonFree, anchor, tz, NEAREST);
+    } else if (singleDay) {
       const target = scope[0]!;
       if (kind !== "times") {
         lines.length = 0;
@@ -333,6 +458,8 @@ export function answerQuery(input: {
   } else if (omittedDays > 0) {
     lines.push("Tengo más días con horarios disponibles; dime cuál te acomoda.");
   }
+  // 026 regla 13: días NOMBRADOS que quedaron fuera de alcance, explicados aparte (nunca negados).
+  if (multiDay && outOfScopeNotes.length > 0) lines.push(...outOfScopeNotes);
 
   // 7) Registro: todo el alcance descrito (tope), `shown` = lo que el texto enseña.
   const catalog = new Map<string, OfferedSlot>();
@@ -389,7 +516,17 @@ type DayResult = {
   edgeOf?: AvailableSlot[];
 };
 
-function clarify(text: string): AvailabilityAnswer {
+/**
+ * 026 — Una aclaración, con la RAZÓN (para variar el texto y decidir el
+ * escalamiento, `agenda-clarify-context.ts`) y lo que ya se entendió (para
+ * heredarlo en el turno siguiente, regla 10). `context` es `null` cuando no
+ * hay nada que recordar.
+ */
+function clarifyWith(
+  text: string,
+  reason: AgendaClarifyReason,
+  context: AgendaClarifyContext | null
+): AvailabilityAnswer {
   return {
     text,
     offers: [],
@@ -398,7 +535,55 @@ function clarify(text: string): AvailabilityAnswer {
     ok: false,
     status: "availability_clarify",
     checks: [],
+    clarify: { reason, context },
   };
+}
+
+/**
+ * 026 — Uno o varios días de `days[]`/`day` que NO se pudieron resolver
+ * (`resolveDayExpression` devolvió `ok:false`). Cuando TODOS fallan por la
+ * misma razón "ya pasó esta semana" (ambigüedad COMPARTIDA de semana), se usa
+ * la pregunta corta de la regla del dueño: «¿esta semana o la próxima?» —
+ * nunca una enumeración cartesiana de fechas por cada día.
+ */
+function buildDayClarify(
+  failed: { token: string; result: Extract<DayResolution, { ok: false }> }[],
+  ctx: Ctx,
+  todayIso: string,
+  attempt: number
+): AvailabilityAnswer {
+  const allPassedThisWeek = failed.every((f) => f.result.reason === "already_passed_this_week");
+  if (allPassedThisWeek) {
+    const passedNames = failed
+      .map((f) => weekdayDatesThisAndNextWeek(f.token, todayIso))
+      .filter((d): d is { same: string; next: string } => d !== null)
+      .map((d) => dayName(d.same, ctx));
+    const label =
+      passedNames.length === 0
+        ? "Ese día"
+        : passedNames.length === 1
+          ? cap(passedNames[0]!)
+          : `${cap(passedNames[0]!)} y ${passedNames[1]!}`;
+    const verb = failed.length > 1 ? "ya pasaron" : "ya pasó";
+    const text =
+      attempt <= 1
+        ? `${label} de esta semana ${verb}. ¿Te refieres a la próxima semana o prefieres otro día?`
+        : "¿Esta semana o la próxima?";
+    return clarifyWith(text, "already_passed_this_week", { days: failed.map((f) => f.token) });
+  }
+
+  // Genérico: una o varias expresiones sin reconocer (o mezcladas con otra razón).
+  const detectedQualifier = failed
+    .map((f) => parseWeekQualifier(f.token).qualifier)
+    .find((q): q is WeekQualifier => q !== "none");
+  const context: AgendaClarifyContext | null = detectedQualifier ? { weekModifier: detectedQualifier } : null;
+  const text =
+    attempt <= 1
+      ? failed.length > 1
+        ? "¿Para qué días quieres que lo revise? Dime, por ejemplo, «jueves y viernes» o una fecha como «25 de septiembre»."
+        : "¿Para qué día quieres que lo revise? Dime, por ejemplo, «mañana», «el lunes» o una fecha como «25 de septiembre»."
+      : `Cuéntame el día así: «jueves», «el 25 de septiembre» o «mañana» (mañana sería ${dayName(addDaysISO(todayIso, 1), ctx)}).`;
+  return clarifyWith(text, "unresolved_day", context);
 }
 
 /** Una respuesta que NO afirma disponibilidad (fecha pasada o fuera de horizonte). */
@@ -561,7 +746,11 @@ function describeDay(
     };
   }
 
-  // day | range | overview
+  // day | days | range | overview — 026: un día nombrado (`multiDay`) sin nada que cumpla
+  // se explica con su causa real, nunca con una lista vacía ("puedo iniciar .").
+  if (r.matches.length === 0) {
+    return { line: dayEmptyText(r.day, kind, ctx, query), shown: [], capped: false };
+  }
   const list = r.matches.slice(0, MAX_REGISTERED);
   const capped = r.matches.length > MAX_REGISTERED;
   const lead = kind === "range" ? `${name} entre esas horas puedo iniciar` : `${name} puedo iniciar`;

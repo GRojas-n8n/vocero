@@ -79,6 +79,15 @@ export async function GET(req: Request) {
   const perDay = clamp(url.searchParams.get("perDay"), LIMITS.perDay);
   const days = clamp(url.searchParams.get("days"), LIMITS.days);
   const dayParam = url.searchParams.get("day")?.trim() || undefined;
+  // 026 — días alternativos: "altDays=jueves,viernes" (coma). NO se llama
+  // "days": ese nombre ya lo tiene la VENTANA numérica de días de la lista
+  // truncada (arriba, `LIMITS.days`) desde 015 — reusarlo habría chocado con
+  // ese contrato ya publicado. Tope real lo aplica `answerQuery` (MAX_QUERY_DAYS).
+  const altDaysParam = url.searchParams
+    .get("altDays")
+    ?.split(",")
+    .map((d) => d.trim())
+    .filter((d) => d !== "");
   const fromParam = url.searchParams.get("from")?.trim() || undefined;
   const toParam = url.searchParams.get("to")?.trim() || undefined;
 
@@ -115,12 +124,13 @@ export async function GET(req: Request) {
     };
   };
 
-  // 025 — CONSULTA DIRECTA (`day`, `from`, `to`): la disponibilidad COMPLETA de lo
-  // pedido, con las mismas reglas que el agente integrado (`check_availability`).
-  if (dayParam || fromParam || toParam) {
+  // 025/026 — CONSULTA DIRECTA (`day`/`altDays`, `from`, `to`): la disponibilidad
+  // COMPLETA de lo pedido, con las mismas reglas que el agente integrado
+  // (`check_availability`).
+  if (dayParam || (altDaysParam && altDaysParam.length > 0) || fromParam || toParam) {
     const answer = await queryAvailability({
       organizationId,
-      query: { day: dayParam, from: fromParam, to: toParam },
+      query: { day: dayParam, days: altDaysParam, from: fromParam, to: toParam },
       settings,
       now,
     });

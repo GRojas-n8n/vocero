@@ -1897,6 +1897,120 @@ async function disponibilidadDirectaChecks() {
 }
 
 /* ============================================================
+ * 026 — Aclaraciones de disponibilidad (tests/e2e/us-aclaraciones-disponibilidad.md)
+ *
+ * Corre a la hora REAL del reloj (sin reloj falseado, a diferencia de las
+ * pruebas de integración): cada aserción compara contra un ORÁCULO —
+ * `GET /api/bot/availability` con la MISMA consulta— en vez de fechas fijas,
+ * para no depender de en qué día de la semana se ejecute el self-test.
+ * ============================================================ */
+
+async function aclaracionesDisponibilidadChecks() {
+  console.log(
+    "\n== 026: aclaraciones de disponibilidad (calificador de semana, días alternativos, memoria entre turnos) =="
+  );
+  const norm = (p) => p.replace(/^521/, "52");
+  const convOf = async (to) =>
+    ((await api("/api/conversations")).json?.conversations ?? []).find((c) => c.contact.phone === to);
+  const inbound = (from, text, id) =>
+    api("/api/dev/wa-mock/inbound", {
+      method: "POST",
+      body: JSON.stringify({
+        phoneNumberId: PN,
+        from,
+        name: `Lead 026 ${RUN}`,
+        text,
+        waMessageId: `wamid.e2e.026.${id}.${RUN}`,
+      }),
+    });
+  const lastBody = async (to) => (await outboundTo(to)).at(-1)?.body?.text?.body ?? "";
+  const truth = async (convId, qs) => (await bot(`/api/bot/availability?conversationId=${convId}${qs}`)).json;
+
+  // 1. «jueves o viernes»: días alternativos, contra el oráculo de CADA día por separado.
+  {
+    const from = `52146${RUN}51`;
+    const to = norm(from);
+    await inbound(from, "quiero agendar una cita", "1a");
+    const n0 = await waitTurn(to, 0);
+    await inbound(from, "¿Jueves o viernes?", "1b");
+    await waitTurn(to, n0);
+    const conv = await convOf(to);
+    const body = await lastBody(to);
+    const jueves = await truth(conv.id, "&day=jueves");
+    const viernes = await truth(conv.id, "&day=viernes");
+    ok(
+      "«jueves o viernes» describe AMBOS días, cada uno con datos reales del motor (oráculo)",
+      (jueves.slots.length === 0 || body.includes(jueves.resumen.split(".")[0])) &&
+        (viernes.slots.length === 0 || body.includes(viernes.resumen.split(".")[0])),
+      JSON.stringify({ body, jueves: jueves.resumen, viernes: viernes.resumen })
+    );
+  }
+
+  // 2. Memoria entre turnos: «la semana que viene» (aclara) → «el lunes» SOLO (hereda
+  //    el calificador). El oráculo es la MISMA consulta completa ("lunes de la
+  //    próxima semana"): si el servidor heredó bien, coinciden.
+  {
+    const from = `52146${RUN}52`;
+    const to = norm(from);
+    await inbound(from, "quiero agendar una cita", "2a");
+    const n0 = await waitTurn(to, 0);
+    await inbound(from, "¿Tienes disponibilidad la semana que viene?", "2b");
+    const n1 = await waitTurn(to, n0);
+    const clarifyBody = await lastBody(to);
+    ok(
+      "«la semana que viene» (sin día) pide aclarar el día, sin horarios",
+      /¿Para qué día quieres que lo revise\?/.test(clarifyBody) && !/\d{1,2}:\d{2}/.test(clarifyBody),
+      clarifyBody
+    );
+    // «para el lunes» a secas (sin "horarios"/"a las") — el ai-mock de prueba necesita
+    // una palabra gatillo explícita para reconocer la consulta (el modelo real no; ver
+    // el prompt real, que no exige esas palabras). "tienes horarios" se la da.
+    await inbound(from, "el lunes, ¿tienes horarios?", "2c");
+    await waitTurn(to, n1);
+    const conv = await convOf(to);
+    const inherited = await lastBody(to);
+    const oracle = await truth(conv.id, `&day=${encodeURIComponent("lunes de la próxima semana")}`);
+    ok(
+      "«el lunes» solo, tras «la semana que viene»: el servidor hereda el calificador (coincide con el oráculo completo)",
+      inherited === oracle.resumen,
+      JSON.stringify({ inherited, oracle: oracle.resumen })
+    );
+  }
+
+  // 3. Límite de aclaraciones: 3 intentos consecutivos sin resolver ⇒ handoff, sin repetir texto.
+  //    «la semana que viene» (sin día) es una expresión que el ai-mock SIEMPRE reconoce como
+  //    check_availability (spec 025 §5.2) y que el servidor JAMÁS resuelve sola (026 §8, fuera
+  //    de alcance): repetirla es la forma determinista de forzar 3 aclaraciones seguidas.
+  {
+    const from = `52146${RUN}53`;
+    const to = norm(from);
+    await inbound(from, "quiero agendar una cita", "3a");
+    let n = await waitTurn(to, 0);
+    await inbound(from, "¿tienes disponibilidad la semana que viene?", "3b");
+    n = await waitTurn(to, n);
+    const first = await lastBody(to);
+    await inbound(from, "¿y la semana que viene, tienes algo?", "3c");
+    n = await waitTurn(to, n);
+    const second = await lastBody(to);
+    ok("la 2.ª aclaración consecutiva NO repite el texto de la 1.ª", second !== first && second.length > 0, JSON.stringify({ first, second }));
+    await inbound(from, "en serio, la semana que viene", "3d");
+    n = await waitTurn(to, n);
+    const third = await lastBody(to);
+    ok(
+      "la 3.ª aclaración consecutiva escala a un humano en vez de preguntar de nuevo",
+      !/¿Para qué día|¿Esta semana/.test(third) && third.length > 0,
+      third
+    );
+    const conv = await convOf(to);
+    ok(
+      "la conversación queda en handoff con la razón `agenda_ambigua`",
+      conv.handoffReason === "agenda_ambigua" && conv.handoffAt != null,
+      JSON.stringify({ handoffReason: conv.handoffReason, handoffAt: conv.handoffAt })
+    );
+  }
+}
+
+/* ============================================================
  * 015 — Motor de agenda universal (tests/e2e/us-agenda.md)
  *
  * Cubre las dos configuraciones de la bandera, las dos garantías
@@ -2445,6 +2559,8 @@ async function agendaChecks() {
   await entregaIntegraChecks();
 
   await disponibilidadDirectaChecks();
+
+  await aclaracionesDisponibilidadChecks();
 
   // Se apaga de vuelta: el resto del guion asume el agente in-process OFF.
   await api("/api/agent/profile", {

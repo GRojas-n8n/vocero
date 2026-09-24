@@ -413,4 +413,15 @@ describe("GET /api/bot/availability (cerebro externo)", () => {
     const wide = await get("&days=8&limit=48&perDay=8");
     expect(wide.json.slots.length).toBeGreaterThan(30); // los parámetros válidos SÍ mandan
   });
+
+  it("026 — `altDays` (días alternativos) y `days` (ventana numérica) conviven en la MISMA llamada sin pisarse", async () => {
+    // `days=3` (ventana) + `altDays=jueves,viernes` (días nombrados) a la vez: cada uno
+    // gobierna lo suyo — la colisión de nombres real (026) se evitó llamando al nuevo "altDays".
+    const { json } = await get("&days=3&altDays=jueves,viernes");
+    expect(json.kind).toBe("days");
+    expect(Array.isArray(json.slots)).toBe(true);
+    // El `days=3` de la ventana sigue funcionando igual que siempre cuando NO hay day/altDays.
+    const windowOnly = await get("&days=3");
+    expect(windowOnly.json.kind).toBe("suggestions");
+  });
 });

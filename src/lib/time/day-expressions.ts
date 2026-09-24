@@ -9,7 +9,12 @@ import { addDaysISO } from "@/lib/time/slots";
  * fechas y zonas horarias es justo lo que un LLM hace mal.
  */
 
-export type DayResolution = { ok: true; dayIso: string } | { ok: false };
+/** 026 — por qué no se pudo resolver un día (además del caso genérico). */
+export type DayFailureReason = "already_passed_this_week";
+
+export type DayResolution =
+  | { ok: true; dayIso: string }
+  | { ok: false; reason?: DayFailureReason };
 
 const WEEKDAY_INDEX: Record<string, number> = {
   domingo: 0,
@@ -70,6 +75,57 @@ export function normalizeExpression(raw: string): string {
     .trim();
 }
 
+/**
+ * 026 — Calificador de semana pegado a un día de semana, SEPARADO del resto
+ * antes de normalizar (si no, «este»/«esta» se pierden como relleno genérico
+ * y «de la próxima semana» nunca hace match con nada).
+ *
+ * - `"next"`  → «de la próxima semana», «de la semana que viene/entrante»,
+ *   «de la otra semana»: SIEMPRE la semana calendario siguiente (regla 4).
+ * - `"same"`  → «este»/«esta»: la semana calendario ACTUAL, puede ser hoy
+ *   (regla 5).
+ * - `"none"`  → sin calificador, o «el próximo»/«que viene» sueltos (sin la
+ *   palabra "semana"): la ocurrencia más cercana, SIN CAMBIO (reglas 1-3, 6).
+ *   («próximo»/«que viene» ya equivalen a "bare" — no acarrean estado propio).
+ */
+export type WeekQualifier = "none" | "same" | "next";
+
+/**
+ * «de la» es OPCIONAL a propósito: cubre tanto «jueves DE LA próxima semana»
+ * (pegado a un día) como una frase SUELTA («la semana que viene», sin día —
+ * evidencia real del dueño, mensaje 1) para que `parseWeekQualifier` la
+ * reconozca igual y el llamador (`buildDayClarify`) pueda recordar el
+ * calificador aunque no haya ningún día que resolver todavía.
+ */
+const NEXT_WEEK_QUALIFIER_RE =
+  /\b(?:de\s+)?(?:la\s+)?(?:proxima\s+semana|otra\s+semana|semana\s+(?:que\s+viene|proxima|entrante))\b/;
+const SAME_WEEK_QUALIFIER_RE = /\b(?:este|esta)\s+/;
+/** «jueves que viene» (SIN "semana"): equivale a bare, no a "next" (regla 1). */
+const BARE_QUE_VIENE_RE = /\s+que\s+viene\b/;
+
+/** Minúsculas, sin acentos, sin signos de relleno — SIN tocar artículos todavía. */
+function lightlyNormalize(raw: string): string {
+  return raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[¿?¡!,;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Separa el calificador de semana del resto de la expresión (día/fecha). */
+export function parseWeekQualifier(raw: string): { qualifier: WeekQualifier; rest: string } {
+  const s = lightlyNormalize(raw);
+  if (NEXT_WEEK_QUALIFIER_RE.test(s)) {
+    return { qualifier: "next", rest: normalizeExpression(s.replace(NEXT_WEEK_QUALIFIER_RE, " ")) };
+  }
+  if (SAME_WEEK_QUALIFIER_RE.test(s)) {
+    return { qualifier: "same", rest: normalizeExpression(s.replace(SAME_WEEK_QUALIFIER_RE, " ")) };
+  }
+  return { qualifier: "none", rest: normalizeExpression(s.replace(BARE_QUE_VIENE_RE, " ")) };
+}
+
 function isRealDate(y: number, m: number, d: number): boolean {
   const t = new Date(Date.UTC(y, m - 1, d));
   return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d;
@@ -82,13 +138,72 @@ export function weekdayIndexOf(dayIso: string): number {
   return new Date(`${dayIso}T00:00:00Z`).getUTCDay();
 }
 
+/** Lunes (ISO) de la semana calendario `[lunes, domingo]` que contiene `dayIso`. */
+function mondayOfWeek(dayIso: string): string {
+  const wd = weekdayIndexOf(dayIso); // 0=domingo..6=sabado
+  return addDaysISO(dayIso, -((wd + 6) % 7));
+}
+
+/**
+ * Un día de semana + su calificador → fecha (026 §3.1). Tres rutas:
+ * - `"none"`: la ocurrencia futura más cercana, NUNCA hoy (D3 de 025, sin
+ *   cambio) — cubre bare, «el próximo», «que viene» (reglas 1-3, 6).
+ * - `"same"`: el día de la semana calendario ACTUAL — puede ser hoy; si ya
+ *   pasó, NO se reinterpreta en silencio (regla 5).
+ * - `"next"`: el día de la semana calendario SIGUIENTE, siempre, exista o no
+ *   ya haya pasado el de esta semana (regla 4).
+ */
+function resolveWeekday(weekday: number, qualifier: WeekQualifier, todayIso: string): DayResolution {
+  const todayWeekday = weekdayIndexOf(todayIso);
+  const offsetFromMonday = (weekday + 6) % 7; // lunes=0 .. domingo=6
+  if (qualifier === "none") {
+    const diff = ((weekday - todayWeekday + 7) % 7) || 7;
+    return { ok: true, dayIso: addDaysISO(todayIso, diff) };
+  }
+  const monday = qualifier === "next" ? addDaysISO(mondayOfWeek(todayIso), 7) : mondayOfWeek(todayIso);
+  const dayIso = addDaysISO(monday, offsetFromMonday);
+  if (qualifier === "same" && dayIso < todayIso) {
+    return { ok: false, reason: "already_passed_this_week" };
+  }
+  return { ok: true, dayIso };
+}
+
+/**
+ * 026 — Las dos fechas candidatas de un día de semana BARE (sin calificador
+ * propio): la de esta semana calendario y la de la siguiente. Para construir
+ * el texto de aclaración «¿esta semana (18 sep) o la próxima (25 sep)?» —
+ * `null` si `weekdayWord` no es un día de semana reconocible. Devuelve la
+ * fecha de "esta semana" aunque ya haya pasado (es justo lo que hay que
+ * nombrar para explicar por qué se pregunta).
+ */
+export function weekdayDatesThisAndNextWeek(
+  weekdayWord: string,
+  todayIso: string
+): { same: string; next: string } | null {
+  const { rest } = parseWeekQualifier(weekdayWord);
+  const weekday = WEEKDAY_INDEX[rest];
+  if (weekday === undefined) return null;
+  const offsetFromMonday = (weekday + 6) % 7;
+  const mondayThis = mondayOfWeek(todayIso);
+  return {
+    same: addDaysISO(mondayThis, offsetFromMonday),
+    next: addDaysISO(addDaysISO(mondayThis, 7), offsetFromMonday),
+  };
+}
+
 /**
  * Resuelve la expresión de día contra «hoy» (ya en la zona del negocio).
  *
- * `lunes` es el PRÓXIMO lunes, nunca hoy: ofrecer hoy por error es peor que
- * pedir una fecha (la respuesta siempre nombra la fecha completa).
+ * `impliedQualifier` — 026: el calificador de semana heredado de una
+ * aclaración anterior (regla 10, `agenda-clarify-context.ts`), usado SÓLO
+ * cuando la expresión de ESTE turno no trae uno explícito propio (el turno
+ * actual manda si hay conflicto).
  */
-export function resolveDayExpression(raw: string, todayIso: string): DayResolution {
+export function resolveDayExpression(
+  raw: string,
+  todayIso: string,
+  impliedQualifier?: "same" | "next"
+): DayResolution {
   const iso = raw.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (iso) {
     return isRealDate(+iso[1]!, +iso[2]!, +iso[3]!)
@@ -96,7 +211,7 @@ export function resolveDayExpression(raw: string, todayIso: string): DayResoluti
       : { ok: false };
   }
 
-  const e = normalizeExpression(raw);
+  const { qualifier: explicitQualifier, rest: e } = parseWeekQualifier(raw);
   if (!e) return { ok: false };
 
   if (e === "hoy" || e === "today") return { ok: true, dayIso: todayIso };
@@ -109,8 +224,9 @@ export function resolveDayExpression(raw: string, todayIso: string): DayResoluti
 
   const weekday = WEEKDAY_INDEX[e];
   if (weekday !== undefined) {
-    const diff = ((weekday - weekdayIndexOf(todayIso) + 7) % 7) || 7;
-    return { ok: true, dayIso: addDaysISO(todayIso, diff) };
+    const qualifier: WeekQualifier =
+      explicitQualifier !== "none" ? explicitQualifier : (impliedQualifier ?? "none");
+    return resolveWeekday(weekday, qualifier, todayIso);
   }
 
   // «25 de septiembre», «25 sep», «25 septiembre 2026»

@@ -44,15 +44,53 @@ export function resetAiMockStats(): void {
   globalForMock.__aiMockCalls = 0;
 }
 
+const WEEKDAY_ALT = "lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo";
+/** 026 — un calificador de semana ("este"/"de la próxima semana"…) pegado a un día. */
+const WEEK_SUFFIX_ALT =
+  "de\\s+la\\s+(?:pr[oó]xima|otra)\\s+semana|de\\s+la\\s+semana\\s+(?:que\\s+viene|entrante|pr[oó]xima)";
+const QUALIFIED_DAY_RE = new RegExp(
+  `\\b(?:(este|esta)\\s+)?(${WEEKDAY_ALT})(?:\\s+(${WEEK_SUFFIX_ALT}))?`,
+  "i"
+);
+
+/** 026 — «jueves o viernes [de la próxima semana]»: el calificador (si lo hay) aplica a ambos. */
+function mockAlternativeDays(text: string): string[] | null {
+  const m = text.match(new RegExp(`\\b(${WEEKDAY_ALT})\\s+o\\s+(${WEEKDAY_ALT})\\b`, "i"));
+  if (!m) return null;
+  const suffixM = text.match(new RegExp(WEEK_SUFFIX_ALT, "i"));
+  const suffix = suffixM ? ` ${suffixM[0]}` : "";
+  return [`${m[1]}${suffix}`, `${m[2]}${suffix}`];
+}
+
 /**
- * 025 — Extrae de la frase del cliente los parámetros de `check_availability`.
+ * 025/026 — Extrae de la frase del cliente los parámetros de `check_availability`.
  * Sólo reconoce un puñado de formas de prueba (`consulta:` no hace falta): el
  * self-test las usa para ejercitar el camino real de punta a punta.
  */
 function mockAvailabilityQuery(
   text: string
-): { day?: string; times?: string[]; from?: string; to?: string; edge?: "earliest" | "latest" } | null {
-  const day = text.match(/\b(hoy|ma[nñ]ana|pasado ma[nñ]ana|lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/)?.[1];
+): {
+  day?: string;
+  days?: string[];
+  times?: string[];
+  from?: string;
+  to?: string;
+  edge?: "earliest" | "latest";
+} | null {
+  const alt = mockAlternativeDays(text);
+  if (alt) return { days: alt };
+
+  // 026 — el día TAL CUAL lo dijo el cliente, con su calificador si trae uno
+  // ("este jueves", "el jueves de la próxima semana"): el servidor es quien
+  // distingue una semana de otra (regla del prompt real).
+  const dayMatch = text.match(QUALIFIED_DAY_RE);
+  const day = dayMatch
+    ? dayMatch[1]
+      ? `${dayMatch[1]} ${dayMatch[2]}`
+      : dayMatch[3]
+        ? `${dayMatch[2]} ${dayMatch[3]}`
+        : dayMatch[2]
+    : text.match(/\b(hoy|ma[nñ]ana|pasado ma[nñ]ana)\b/)?.[1];
   if (/\b(m[aá]s tarde|[uú]ltimo horario)\b/.test(text)) {
     return { ...(day ? { day } : {}), edge: "latest" };
   }
@@ -67,8 +105,8 @@ function mockAvailabilityQuery(
     if (hours[3]) times.push(`${hours[3]}${hours[4] ? `:${hours[4]}` : ""}${suffix}`);
     return { day, times };
   }
-  // «más horarios mañana», «qué horarios hay el lunes»
-  if (day && /\bhorarios?\b/.test(text)) return { day };
+  // «más horarios mañana», «qué horarios hay el lunes», «este jueves», «el jueves de la próxima semana»
+  if (day && /\bhorarios?\b|\best[ae]\b|\bpr[oó]xima\s+semana\b/.test(text)) return { day };
   // Expresión que el servidor NO soporta («la semana que viene»): el modelo la pasa
   // tal cual y es el servidor quien pide la aclaración (spec 025 §5.2).
   const week = text.match(/\b(la )?semana (que viene|pr[oó]xima|siguiente)\b/);

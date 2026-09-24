@@ -45,6 +45,34 @@ describe("normalizeQueryFields — vacío es AUSENCIA", () => {
   });
 });
 
+describe("normalizeQueryFields — 026: `days` (días alternativos)", () => {
+  it("un texto suelto o números en `days` se normalizan igual que `times`", () => {
+    expect(normalizeQueryFields({ days: "jueves" })).toEqual({ days: ["jueves"] });
+    expect(normalizeQueryFields({ days: ["jueves", "", " viernes ", "  "] })).toEqual({
+      days: ["jueves", "viernes"],
+    });
+  });
+
+  it("`days` vacío es AUSENCIA, igual que `day`", () => {
+    expect(normalizeQueryFields({ days: [] })).toEqual({});
+    expect(normalizeQueryFields({ days: ["", "  "] })).toEqual({});
+    expect(normalizeQueryFields({ days: null })).toEqual({});
+  });
+
+  it("`day` y `days` son mutuamente excluyentes: `days` gana si viene con contenido", () => {
+    expect(normalizeQueryFields({ day: "lunes", days: ["jueves", "viernes"] })).toEqual({
+      days: ["jueves", "viernes"],
+    });
+    // `days` vacío no gana: `day` sobrevive.
+    expect(normalizeQueryFields({ day: "lunes", days: [] })).toEqual({ day: "lunes" });
+  });
+
+  it("tope defensivo: nunca deja pasar una lista descomunal", () => {
+    const huge = Array.from({ length: 50 }, (_, i) => `dia${i}`);
+    expect(normalizeQueryFields({ days: huge }).days).toHaveLength(10);
+  });
+});
+
 describe("normalizeAgentActionInput — sólo toca check_availability", () => {
   it("el sobre ruidoso de un modelo pequeño en modo estricto queda limpio", () => {
     expect(

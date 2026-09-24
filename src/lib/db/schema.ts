@@ -359,6 +359,8 @@ export const conversation = pgTable(
       // reprogramacion (auditoría 2026-09-17): el cliente pidió mover una cita
       // y no hay una herramienta de reprogramación segura para el agente
       // incluido — se deriva y se bloquea una cita sustitutiva.
+      // agenda_ambigua (026): 3 aclaraciones de disponibilidad consecutivas
+      // sin resolver (regla 15) — sin migración, el `enum` es sólo de TS.
       enum: [
         "cliente",
         "modelo",
@@ -367,6 +369,7 @@ export const conversation = pgTable(
         "hostilidad",
         "manual_reply",
         "reprogramacion",
+        "agenda_ambigua",
       ],
     }),
     lastInboundAt: timestamp("last_inbound_at"),
@@ -386,6 +389,24 @@ export const conversation = pgTable(
     aiFailCount: integer("ai_fail_count").notNull().default(0),
     aiFailKind: text("ai_fail_kind"),
     aiFailAt: timestamp("ai_fail_at"),
+    /**
+     * 026 — Memoria de aclaración de disponibilidad, CONSECUTIVA por
+     * conversación (mismo patrón que `ai_fail_*` de 023, migración 0024).
+     * `agenda_clarify_count`: cuántas aclaraciones seguidas sin resolver
+     * (≥ 3 ⇒ handoff `agenda_ambigua`, regla 15). `agenda_clarify_kind`: la
+     * última razón (`unresolved_day` · `already_passed_this_week` ·
+     * `too_many_days` · `unresolved_time` · `unresolved_range`) — el `enum`
+     * es sólo de TypeScript, agregar razones no exige migración.
+     * `agenda_clarify_context`: JSON acotado (≤ 300 car.) con SÓLO lo ya
+     * entendido (calificador de semana, palabras de día) — nunca el mensaje
+     * completo del cliente ni ningún dato personal (`agenda-clarify-context.ts`
+     * sanea antes de escribir). Se resetea a 0/null/null cuando el turno
+     * resuelve, se crea una cita, cambia de forma inequívoca el tema, o
+     * interviene un humano (cualquier handoff, `applyHandoff`).
+     */
+    agendaClarifyCount: integer("agenda_clarify_count").notNull().default(0),
+    agendaClarifyKind: text("agenda_clarify_kind"),
+    agendaClarifyContext: text("agenda_clarify_context"),
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
   },
